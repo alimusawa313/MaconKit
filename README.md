@@ -39,8 +39,8 @@ brew install --HEAD macon
 ```
 
 ### Publishing stable releases (automated)
-Releasing is one command — the [release workflow](.github/workflows/release.yml)
-verifies the build and updates the tap formula's version + sha256 on every tag:
+Releasing is one command — the release workflow (`.github/workflows/release.yml`
+at the repo root) verifies the build and updates the tap formula on every tag:
 ```sh
 git tag v0.1.0 && git push --tags
 ```
