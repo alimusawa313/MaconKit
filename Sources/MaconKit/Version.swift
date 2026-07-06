@@ -1,3 +1,5 @@
 import Foundation
 
-public let maconVersion = "0.1.0"
+// Stamped by the Homebrew formula at build time (inreplace) to match the release
+// tag. The literal here is the dev/fallback value.
+public let maconVersion = "0.1.2"

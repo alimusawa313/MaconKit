@@ -15,6 +15,9 @@ class Macon < Formula
   depends_on :macos
 
   def install
+    # Stamp the release version into the binary so `macon version` matches the tag.
+    inreplace "MaconKit/Sources/MaconKit/Version.swift",
+              /maconVersion = "[^"]*"/, "maconVersion = \"#{version}\""
     # Monorepo: the Swift package lives in the MaconKit/ subdirectory.
     system "swift", "build", "--disable-sandbox", "-c", "release", "--package-path", "MaconKit"
     bin.install "MaconKit/.build/release/macon"
