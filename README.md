@@ -9,6 +9,7 @@ the CLI both build on `MaconKit`, so a pipeline runs identically in either.
 macon version
 macon lint [path]                 # parse & summarize a macon.yml
 macon run [--workflow N] [--branch B] [--file macon.yml] [path]
+macon watch --workspace WS --repo SLUG [--branch B | --prs] [options]
 ```
 
 `macon run` executes a `macon.yml` workflow in a repo directory (the current
@@ -18,6 +19,24 @@ git hook, cron, or another CI. Secrets are read from the inherited shell env:
 ```sh
 ASC_KEY_ID=… ASC_ISSUER_ID=… ASC_KEY_CONTENT=… macon run --workflow beta
 ```
+
+`macon watch` is the headless equivalent of the app's **Start Watching**: it
+polls a Bitbucket repo, clones/checks out each new commit (or open PR), runs the
+matching `macon.yml` workflow, and posts build status back. It runs until Ctrl-C
+— ideal under `tmux`, `nohup`, or a `launchd` job. Auth comes from `--email` /
+`--token` or the `BITBUCKET_EMAIL` / `BITBUCKET_API_TOKEN` env vars; secrets are
+inherited from the shell env, same as `run`.
+
+```sh
+export BITBUCKET_EMAIL=you@example.com BITBUCKET_API_TOKEN=…
+# watch main, build every new commit:
+macon watch --workspace academytools --repo planpal-ios-learner-2 --branch main
+# watch open PRs targeting main instead:
+macon watch --workspace academytools --repo planpal-ios-learner-2 --prs --pr-target main
+```
+
+Run `macon help` for the full option list (`--dir`, `--every`, `--workflow`,
+`--file`, `--no-status`).
 
 ## Install now (no Homebrew)
 
