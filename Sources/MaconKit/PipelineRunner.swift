@@ -32,8 +32,15 @@ public final class PipelineRunner: ObservableObject, Identifiable {
     private var prBaselineEstablished = false
     private var currentPR: BitbucketClient.PullRequest?
     private var pollTask: Task<Void, Never>?
-    private var currentProcess: Process?
-    private var cancelRequested = false
+    /// Per-build cancellation + current-process handle, shared with the executor.
+    /// `@unchecked Sendable` so the nonisolated executor can read/write it safely enough
+    /// for our purposes (single writer for the process, a bool flag for cancel).
+    final class ExecutionControl: @unchecked Sendable {
+        var cancelled = false
+        var currentProcess: Process?
+        func cancel() { cancelled = true; currentProcess?.terminate() }
+    }
+    private var control = ExecutionControl()
     private var nextLineID = 0
     private let maxLines = 4000
     private let statusKey = "macon-ci"
@@ -120,7 +127,7 @@ public final class PipelineRunner: ObservableObject, Identifiable {
             if sha != lastBuiltSHA && !isBuilding {
                 appendLine("🔔 New commit \(sha.prefix(8)) on \(config.branch).")
                 isBuilding = true
-                cancelRequested = false
+                control = ExecutionControl()
                 await build(sha: sha)
             }
         } catch {
@@ -145,12 +152,12 @@ public final class PipelineRunner: ObservableObject, Identifiable {
                 return
             }
             for pr in prs {
-                if cancelRequested || isBuilding { break }
+                if control.cancelled || isBuilding { break }
                 if lastBuiltPRSHAs[pr.id] != pr.sourceCommit {
                     appendLine("🔔 PR #\(pr.id) “\(pr.title)” → \(pr.sourceCommit.prefix(8)).")
                     lastBuiltPRSHAs[pr.id] = pr.sourceCommit
                     isBuilding = true
-                    cancelRequested = false
+                    control = ExecutionControl()
                     await build(sha: pr.sourceCommit, pr: pr)
                 }
             }
@@ -169,13 +176,13 @@ public final class PipelineRunner: ObservableObject, Identifiable {
             return
         }
         isBuilding = true          // immediate UI feedback (button → Stop)
-        cancelRequested = false
+        control = ExecutionControl()
         appendLine("⏳ Fetching head commit…")
         Task { @MainActor in
             do {
                 let sha = try await client.latestCommit(
                     workspace: config.workspace, repo: config.repoSlug, branch: config.branch)
-                if cancelRequested {
+                if control.cancelled {
                     appendLine("⏹ Cancelled before build started.")
                     isBuilding = false
                     return
@@ -210,22 +217,33 @@ public final class PipelineRunner: ObservableObject, Identifiable {
 
         let synced = await syncRepo(sha: sha)
         var code: Int32 = synced
-        if synced == 0 && !cancelRequested {
+        if synced == 0 && !control.cancelled {
             if let pipeline = await loadPipelineFile(in: config.workingDirectory) {
                 appendLine("📄 Using \(config.pipelineFile)"
                            + (pipeline.name.map { " — \($0)" } ?? ""))
-                code = await runPipeline(pipeline, sha: sha)
+                let ctrl = control
+                let options = PipelineExecutor.Options(
+                    workingDirectory: config.workingDirectory,
+                    workflowName: config.workflow,
+                    branch: pr == nil ? config.branch : nil,
+                    pullRequestDestBranch: pr?.destBranch,
+                    env: externalEnv(sha: sha),
+                    shouldCancel: { ctrl.cancelled },
+                    onProcess: { ctrl.currentProcess = $0 })
+                code = await PipelineExecutor.run(pipeline, options: options,
+                                                  onLine: { [weak self] line in
+                    Task { @MainActor in self?.appendLine(line) }
+                })
             } else {
-                code = await runShell(config.buildCommand, cwd: config.workingDirectory)
+                code = await shellStep(config.buildCommand)
             }
         }
 
         lastBuiltSHA = sha
         isBuilding = false
-        currentProcess = nil
 
         let result: RunResult
-        if cancelRequested {
+        if control.cancelled {
             result = .cancelled
             buildState = .failed(sha: sha)
             appendLine("⏹ Build cancelled.")
@@ -257,9 +275,8 @@ public final class PipelineRunner: ObservableObject, Identifiable {
     /// Stop the in-flight build: kills the running shell and skips remaining steps.
     public func cancelBuild() {
         guard isBuilding else { return }
-        cancelRequested = true
+        control.cancel()
         appendLine("⏹ Cancelling build…")
-        currentProcess?.terminate()
     }
 
     // MARK: - Repo-defined pipeline (macon.yml)
@@ -277,130 +294,21 @@ public final class PipelineRunner: ObservableObject, Identifiable {
         return pipeline
     }
 
-    private struct ResolvedStep { let step: MaconStep; let env: [String: String] }
-
-    /// Resolve the workflow to run, expand before/after composition, then execute
-    /// with Bitrise-like semantics (run_if conditions, always_run, fail-fast).
-    private func runPipeline(_ pipeline: MaconPipeline, sha: String) async -> Int32 {
-        let appEnv = pipeline.env ?? [:]
-        var resolved: [ResolvedStep] = []
-        var workflowName = "default"
-
-        if let name = chooseWorkflow(pipeline) {
-            workflowName = name
-            appendLine("▶︎ Workflow: \(name)")
-            var visiting = Set<String>()
-            expand(name, pipeline, appEnv: appEnv, visiting: &visiting, into: &resolved)
-            if resolved.isEmpty {
-                appendLine("✗ Workflow “\(name)” has no steps."); return 1
-            }
-        } else if let steps = pipeline.steps, !steps.isEmpty {
-            resolved = steps.map { ResolvedStep(step: $0, env: appEnv) }
-        } else {
-            appendLine("✗ No workflow matched branch “\(config.branch)” and no top-level steps.")
-            return 1
-        }
-
-        let builtins = builtinEnv(sha: sha, workflow: workflowName)
-        let secrets = loadSecrets()
-        var failed = false
-        var firstFailCode: Int32 = 0
-
-        for r in resolved {
-            if cancelRequested { return firstFailCode == 0 ? 1 : firstFailCode }
-            appendLine("--- Step: \(r.step.name) ---")
-
-            if failed && !(r.step.always_run ?? false) {
-                appendLine("↷ Skipped (a previous step failed).")
-                continue
-            }
-            var env = r.env
-            for (k, v) in builtins { env[k] = v }
-            for (k, v) in secrets { env[k] = v }   // user secrets win
-
-            if let cond = r.step.run_if?.trimmingCharacters(in: .whitespacesAndNewlines), !cond.isEmpty {
-                let condCode = await runShell(cond, cwd: config.workingDirectory, echo: false, extraEnv: env)
-                if condCode != 0 { appendLine("↷ Skipped (run_if not met)."); continue }
-            }
-
-            let code = await runShell(r.step.script, cwd: config.workingDirectory, echo: false, extraEnv: env)
-            if code != 0 {
-                appendLine("✗ Step “\(r.step.name)” failed (exit \(code)).")
-                if !failed { failed = true; firstFailCode = code }
-            }
-        }
-        return failed ? firstFailCode : 0
-    }
-
-    /// Pick the workflow: explicit config override, else match branch to triggers,
-    /// else a single/`default` workflow.
-    private func chooseWorkflow(_ pipeline: MaconPipeline) -> String? {
-        let explicit = config.workflow.trimmingCharacters(in: .whitespaces)
-        if !explicit.isEmpty { return explicit }
-        if let triggers = pipeline.triggers {
-            if let pr = currentPR {
-                // PR build: match pull_request triggers against the destination branch.
-                for t in triggers {
-                    if let p = t.pull_request, p == "*" || globMatch(p, pr.destBranch) {
-                        return t.workflow
-                    }
-                }
-            } else {
-                for t in triggers {
-                    if let b = t.branch, globMatch(b, config.branch) { return t.workflow }
-                }
-            }
-        }
-        if pipeline.workflows?["default"] != nil { return "default" }
-        if let wfs = pipeline.workflows, wfs.count == 1 { return wfs.keys.first }
-        return nil
-    }
-
-    /// Expand a workflow into a flat step list: before_run → own steps → after_run.
-    /// `visiting` guards against cycles and double-runs.
-    private func expand(_ name: String, _ pipeline: MaconPipeline,
-                        appEnv: [String: String], visiting: inout Set<String>,
-                        into out: inout [ResolvedStep]) {
-        guard !visiting.contains(name) else { return }
-        guard let wf = pipeline.workflows?[name] else {
-            appendLine("⚠︎ Referenced workflow “\(name)” not found."); return
-        }
-        visiting.insert(name)
-        for b in wf.before_run ?? [] { expand(b, pipeline, appEnv: appEnv, visiting: &visiting, into: &out) }
-        var env = appEnv
-        for (k, v) in wf.env ?? [:] { env[k] = v }
-        for s in wf.steps ?? [] { out.append(ResolvedStep(step: s, env: env)) }
-        for a in wf.after_run ?? [] { expand(a, pipeline, appEnv: appEnv, visiting: &visiting, into: &out) }
-    }
-
-    /// Secret env values: global (shared) overlaid with this pipeline's own,
-    /// so a per-pipeline secret overrides a global one of the same name.
-    private func loadSecrets() -> [String: String] {
-        var out = loadGlobalSecrets()
-        for key in config.secretKeys {
-            let v = Keychain.get(account: "secret:\(config.id.uuidString):\(key)")
-            if !v.isEmpty { out[key] = v }
-        }
-        return out
-    }
-
-    private func builtinEnv(sha: String, workflow: String) -> [String: String] {
+    /// External env passed to the executor: MACON_*/CI + credentials + PR vars,
+    /// merged with secrets (secrets win). MACON_WORKFLOW is set by the executor.
+    private func externalEnv(sha: String) -> [String: String] {
         var env: [String: String] = [
             "MACON_COMMIT": sha,
             "MACON_COMMIT_SHORT": String(sha.prefix(8)),
             "MACON_BRANCH": config.branch,
             "MACON_REPO": "\(config.workspace)/\(config.repoSlug)",
-            "MACON_WORKFLOW": workflow,
             "MACON_BUILD_NUMBER": "\(history.count + 1)",
             "CI": "true",
         ]
-        // Expose the account so steps (e.g. Danger, git) can authenticate.
         if let client = makeClient() {
             env["BITBUCKET_EMAIL"] = client.email
             env["BITBUCKET_API_TOKEN"] = client.token
         }
-        // PR context — also set the env Danger's Bitbucket Cloud provider reads,
-        // so `danger ci` detects the PR and can post comments.
         if let pr = currentPR {
             env["MACON_BRANCH"] = pr.sourceBranch
             env["MACON_PR_ID"] = "\(pr.id)"
@@ -415,21 +323,25 @@ public final class PipelineRunner: ObservableObject, Identifiable {
             env["BITBUCKET_COMMIT"] = sha
             env["BITBUCKET_BUILD_NUMBER"] = "\(history.count + 1)"
         }
+        // Secrets (global + per-pipeline) win over everything.
+        for (k, v) in loadSecrets() { env[k] = v }
         return env
     }
 
-    private func globMatch(_ pattern: String, _ value: String) -> Bool {
-        let rx = NSRegularExpression.escapedPattern(for: pattern)
-            .replacingOccurrences(of: "\\*", with: ".*")
-            .replacingOccurrences(of: "\\?", with: ".")
-        return value.range(of: "^\(rx)$", options: .regularExpression) != nil
+    /// Secret env values: global (shared) overlaid with this pipeline's own.
+    private func loadSecrets() -> [String: String] {
+        var out = loadGlobalSecrets()
+        for key in config.secretKeys {
+            let v = Keychain.get(account: "secret:\(config.id.uuidString):\(key)")
+            if !v.isEmpty { out[key] = v }
+        }
+        return out
     }
 
     /// Clone (first run) or fetch + hard-checkout the target commit.
     private func syncRepo(sha: String) async -> Int32 {
         let dir = config.workingDirectory
-        let token = makeClient() != nil ? currentToken() : ""
-        // Token-authenticated HTTPS URL (matches Bitbucket's app-token git auth).
+        let token = makeClient()?.token ?? ""
         let authedURL = "https://x-bitbucket-api-token-auth:\(token)@bitbucket.org/"
             + "\(config.workspace)/\(config.repoSlug).git"
         let safeURL = "https://x-bitbucket-api-token-auth:***@bitbucket.org/"
@@ -451,8 +363,24 @@ public final class PipelineRunner: ObservableObject, Identifiable {
         git -C "\(dir)" checkout -f "\(sha)"
         git -C "\(dir)" reset --hard "\(sha)"
         """
-        let display = script.replacingOccurrences(of: authedURL, with: safeURL)
-        return await runShell(script, cwd: NSHomeDirectory(), display: display)
+        appendLine("$ " + script.replacingOccurrences(of: authedURL, with: safeURL))
+        return await shell(script, cwd: NSHomeDirectory())
+    }
+
+    /// Fallback build command (no macon.yml) — echoes then runs in the checkout.
+    private func shellStep(_ command: String) async -> Int32 {
+        appendLine("$ \(command)")
+        return await shell(command, cwd: config.workingDirectory, extraEnv: externalEnv(sha: lastBuiltSHA ?? ""))
+    }
+
+    /// Run a shell command via the shared Shell, streaming lines into the log.
+    private func shell(_ command: String, cwd: String, extraEnv: [String: String] = [:]) async -> Int32 {
+        let ctrl = control
+        return await Shell.run(command, cwd: cwd, extraEnv: extraEnv,
+                               onProcess: { ctrl.currentProcess = $0 },
+                               onLine: { [weak self] line in
+            Task { @MainActor in self?.appendLine(line) }
+        })
     }
 
     private func post(_ client: BitbucketClient?, sha: String,
@@ -467,61 +395,8 @@ public final class PipelineRunner: ObservableObject, Identifiable {
         }
     }
 
-    // MARK: - Shell
-
-    private func currentToken() -> String { makeClient().map { $0.token } ?? "" }
-
-    private func runShell(_ command: String, cwd: String, display: String? = nil,
-                          echo: Bool = true, extraEnv: [String: String] = [:]) async -> Int32 {
-        if echo { appendLine("$ \(display ?? command)") }
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        proc.arguments = ["-lc", command]
-        proc.currentDirectoryURL = URL(fileURLWithPath: cwd.isEmpty ? NSHomeDirectory() : cwd)
-        if !extraEnv.isEmpty {
-            var env = ProcessInfo.processInfo.environment
-            for (k, v) in extraEnv { env[k] = v }
-            proc.environment = env
-        }
-
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = pipe
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
-            let d = h.availableData
-            guard !d.isEmpty, let s = String(data: d, encoding: .utf8) else { return }
-            Task { @MainActor in self?.ingest(s) }
-        }
-
-        let code = await withCheckedContinuation { (cont: CheckedContinuation<Int32, Never>) in
-            proc.terminationHandler = { p in
-                let handle = pipe.fileHandleForReading
-                handle.readabilityHandler = nil
-                let rest = handle.readDataToEndOfFile()
-                if !rest.isEmpty, let s = String(data: rest, encoding: .utf8) {
-                    Task { @MainActor in self.ingest(s) }
-                }
-                cont.resume(returning: p.terminationStatus)
-            }
-            do {
-                currentProcess = proc
-                try proc.run()
-            } catch {
-                Task { @MainActor in self.appendLine("✗ \(error.localizedDescription)") }
-                cont.resume(returning: -1)
-            }
-        }
-        return code
-    }
-
     // MARK: - Logging
 
-    private func ingest(_ chunk: String) {
-        for raw in chunk.split(separator: "\n", omittingEmptySubsequences: false) {
-            let line = String(raw)
-            if !line.isEmpty { appendLine(line) }
-        }
-    }
     private func appendLine(_ text: String) {
         let line = LogLine(id: nextLineID, text: text, date: Date())
         log.append(line)

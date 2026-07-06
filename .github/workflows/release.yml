@@ -1,0 +1,81 @@
+name: Release
+
+# Tag & push `vX.Y.Z` → verify the build, then update the Homebrew tap formula
+# with the new version + tarball sha256. Releasing becomes: `git tag v0.2.0 && git push --tags`.
+#
+# Requires a repo secret HOMEBREW_TAP_TOKEN: a PAT with `contents:write` on your
+# `homebrew-macon` tap repo (Settings → Secrets and variables → Actions).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build release
+        run: swift build --disable-sandbox -c release --package-path MaconKit
+      - name: Smoke test
+        run: "MaconKit/.build/release/macon version"
+
+  update-tap:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute tarball URL + sha256
+        id: meta
+        run: |
+          URL="https://github.com/${{ github.repository }}/archive/refs/tags/${{ github.ref_name }}.tar.gz"
+          SHA=$(curl -fsSL "$URL" | sha256sum | awk '{print $1}')
+          {
+            echo "url=$URL"
+            echo "sha=$SHA"
+            echo "version=${GITHUB_REF_NAME#v}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the tap
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/homebrew-macon
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Write formula
+        run: |
+          mkdir -p tap/Formula
+          cat > tap/Formula/macon.rb <<EOF
+          class Macon < Formula
+            desc "Local CI runner — runs macon.yml pipelines on your Mac"
+            homepage "https://github.com/${{ github.repository }}"
+            url "${{ steps.meta.outputs.url }}"
+            sha256 "${{ steps.meta.outputs.sha }}"
+            version "${{ steps.meta.outputs.version }}"
+            license "MIT"
+
+            depends_on xcode: ["15.0", :build]
+            depends_on :macos
+
+            def install
+              system "swift", "build", "--disable-sandbox", "-c", "release", "--package-path", "MaconKit"
+              bin.install "MaconKit/.build/release/macon"
+            end
+
+            test do
+              assert_match "macon", shell_output("#{bin}/macon version")
+            end
+          end
+          EOF
+
+      - name: Commit & push to tap
+        run: |
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/macon.rb
+          git commit -m "macon ${{ github.ref_name }}" || { echo "no change"; exit 0; }
+          git push
