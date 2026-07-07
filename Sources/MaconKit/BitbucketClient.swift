@@ -2,15 +2,17 @@
 //  BitbucketClient.swift
 //  MacON
 //
-//  Thin Bitbucket Cloud REST client: read latest commit, post build status.
+//  Bitbucket Cloud implementation of GitProvider.
 //
 
 import Foundation
 
-public struct BitbucketClient: Sendable {
+public struct BitbucketClient: Sendable, GitProvider {
     public init(email: String, token: String) { self.email = email; self.token = token }
     let email: String
     let token: String
+
+    public var kind: GitProviderKind { .bitbucket }
 
     enum ClientError: LocalizedError {
         case http(Int, String)
@@ -33,7 +35,7 @@ public struct BitbucketClient: Sendable {
     private static let base = "https://api.bitbucket.org/2.0/repositories"
 
     /// The head commit hash of a branch.
-    func latestCommit(workspace: String, repo: String, branch: String) async throws -> String {
+    public func latestCommit(workspace: String, repo: String, branch: String) async throws -> String {
         let path = "\(Self.base)/\(workspace)/\(repo)/refs/branches/\(branch)"
         guard let url = URL(string: path) else { throw ClientError.badResponse }
         var req = URLRequest(url: url)
@@ -70,16 +72,8 @@ public struct BitbucketClient: Sendable {
             .compactMap { $0["name"] as? String }
     }
 
-    struct PullRequest: Sendable, Identifiable {
-        let id: Int
-        let title: String
-        let sourceBranch: String
-        let sourceCommit: String
-        let destBranch: String
-    }
-
-    /// Open pull requests, optionally filtered by destination branch.
-    func listOpenPullRequests(workspace: String, repo: String) async throws -> [PullRequest] {
+    /// Open pull requests.
+    public func listOpenPullRequests(workspace: String, repo: String) async throws -> [GitPullRequest] {
         let base = "\(Self.base)/\(workspace)/\(repo)/pullrequests?state=OPEN&pagelen=50"
         return try await pagedValues(base).compactMap { pr in
             guard let id = pr["id"] as? Int,
@@ -88,7 +82,7 @@ public struct BitbucketClient: Sendable {
                   let srcCommit = (source["commit"] as? [String: Any])?["hash"] as? String
             else { return nil }
             let dest = (pr["destination"] as? [String: Any])?["branch"] as? [String: Any]
-            return PullRequest(
+            return GitPullRequest(
                 id: id,
                 title: pr["title"] as? String ?? "PR #\(id)",
                 sourceBranch: srcBranch,
@@ -118,12 +112,16 @@ public struct BitbucketClient: Sendable {
         return results
     }
 
-    enum Status: String { case inProgress = "INPROGRESS", successful = "SUCCESSFUL", failed = "FAILED" }
-
     /// Post a build status to a commit (shows up as a CI check on PRs).
-    func postBuildStatus(workspace: String, repo: String, sha: String,
-                         key: String, state: Status, name: String,
-                         description: String) async throws {
+    public func postBuildStatus(workspace: String, repo: String, sha: String,
+                                key: String, state: BuildStatus, name: String,
+                                description: String) async throws {
+        let raw: String
+        switch state {
+        case .inProgress: raw = "INPROGRESS"
+        case .successful: raw = "SUCCESSFUL"
+        case .failed:     raw = "FAILED"
+        }
         let path = "\(Self.base)/\(workspace)/\(repo)/commit/\(sha)/statuses/build"
         guard let url = URL(string: path) else { throw ClientError.badResponse }
         var req = URLRequest(url: url)
@@ -132,7 +130,7 @@ public struct BitbucketClient: Sendable {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let body: [String: Any] = [
             "key": key,
-            "state": state.rawValue,
+            "state": raw,
             "name": name,
             "description": description,
             "url": "https://bitbucket.org/\(workspace)/\(repo)/commits/\(sha)",
@@ -144,5 +142,32 @@ public struct BitbucketClient: Sendable {
         guard (200..<300).contains(http.statusCode) else {
             throw ClientError.http(http.statusCode, String(data: data, encoding: .utf8) ?? "")
         }
+    }
+
+    // MARK: - Clone + env
+
+    public func cloneURL(workspace: String, repo: String) -> (authed: String, safe: String) {
+        let t = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        let authed = "https://x-bitbucket-api-token-auth:\(t)@bitbucket.org/\(workspace)/\(repo).git"
+        let safe = "https://x-bitbucket-api-token-auth:***@bitbucket.org/\(workspace)/\(repo).git"
+        return (authed, safe)
+    }
+
+    public func stepEnv(workspace: String, repo: String, sha: String, branch: String,
+                        pr: GitPullRequest?, buildNumber: Int) -> [String: String] {
+        var env = [
+            "BITBUCKET_EMAIL": email,
+            "BITBUCKET_API_TOKEN": token,
+        ]
+        if let pr {
+            env["BITBUCKET_PR_ID"] = "\(pr.id)"
+            env["BITBUCKET_REPO_FULL_NAME"] = "\(workspace)/\(repo)"
+            env["BITBUCKET_REPO_OWNER"] = workspace
+            env["BITBUCKET_REPO_SLUG"] = repo
+            env["BITBUCKET_BRANCH"] = pr.sourceBranch
+            env["BITBUCKET_COMMIT"] = sha
+            env["BITBUCKET_BUILD_NUMBER"] = "\(buildNumber)"
+        }
+        return env
     }
 }

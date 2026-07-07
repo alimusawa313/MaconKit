@@ -20,17 +20,20 @@ public final class PipelineRunner: ObservableObject, Identifiable {
     /// Past runs (newest first), loaded from disk.
     @Published public private(set) var history: [RunSummary] = []
 
-    /// Supplies a client from the pool's shared credentials (nil if not set).
-    public var makeClient: () -> BitbucketClient? = { nil }
+    /// Supplies a client for the given provider (nil if its credentials aren't set).
+    public var makeClient: (GitProviderKind) -> (any GitProvider)? = { _ in nil }
     /// Supplies the pool's global secrets (shared by all pipelines).
     public var loadGlobalSecrets: () -> [String: String] = { [:] }
 
     public var id: UUID { config.id }
 
+    /// The client for this pipeline's configured provider.
+    private func client() -> (any GitProvider)? { makeClient(config.provider) }
+
     private var lastBuiltSHA: String?
     private var lastBuiltPRSHAs: [Int: String] = [:]
     private var prBaselineEstablished = false
-    private var currentPR: BitbucketClient.PullRequest?
+    private var currentPR: GitPullRequest?
     private var pollTask: Task<Void, Never>?
     /// Per-build cancellation + current-process handle, shared with the executor.
     /// `@unchecked Sendable` so the nonisolated executor can read/write it safely enough
@@ -69,8 +72,9 @@ public final class PipelineRunner: ObservableObject, Identifiable {
 
     public func startWatching() {
         guard !isWatching else { return }
-        guard makeClient() != nil else {
-            appendLine("⚠︎ Set your Bitbucket account in Settings first (email + API token).")
+        guard client() != nil else {
+            let what = config.provider == .github ? "GitHub token" : "Bitbucket account (email + API token)"
+            appendLine("⚠︎ Set your \(what) in Settings first.")
             return
         }
         guard !config.workspace.isEmpty, !config.repoSlug.isEmpty else {
@@ -149,7 +153,7 @@ public final class PipelineRunner: ObservableObject, Identifiable {
             let filter = config.prTargetBranch.trimmingCharacters(in: .whitespaces)
             if !filter.isEmpty, event.prDestBranch != filter { return }
             guard lastBuiltPRSHAs[prID] != event.commit else { return }
-            let pr = BitbucketClient.PullRequest(
+            let pr = GitPullRequest(
                 id: prID, title: event.prTitle ?? "PR #\(prID)",
                 sourceBranch: event.prSourceBranch ?? event.branch,
                 sourceCommit: event.commit,
@@ -170,14 +174,14 @@ public final class PipelineRunner: ObservableObject, Identifiable {
     }
 
     private func pollOnce() async {
-        guard let client = makeClient() else { return }
+        guard let client = client() else { return }
         switch config.watchMode {
         case .branch:       await pollBranch(client)
         case .pullRequests: await pollPRs(client)
         }
     }
 
-    private func pollBranch(_ client: BitbucketClient) async {
+    private func pollBranch(_ client: any GitProvider) async {
         do {
             let sha = try await client.latestCommit(
                 workspace: config.workspace, repo: config.repoSlug, branch: config.branch)
@@ -199,7 +203,7 @@ public final class PipelineRunner: ObservableObject, Identifiable {
         }
     }
 
-    private func pollPRs(_ client: BitbucketClient) async {
+    private func pollPRs(_ client: any GitProvider) async {
         guard !isBuilding else { return }
         do {
             var prs = try await client.listOpenPullRequests(
@@ -235,8 +239,9 @@ public final class PipelineRunner: ObservableObject, Identifiable {
     /// Build the current head now, regardless of whether it's new.
     public func runNow() {
         guard !isBuilding else { return }
-        guard let client = makeClient() else {
-            appendLine("⚠︎ Set your Bitbucket account in Settings first.")
+        guard let client = client() else {
+            let what = config.provider == .github ? "GitHub token" : "Bitbucket account"
+            appendLine("⚠︎ Set your \(what) in Settings first.")
             return
         }
         isBuilding = true          // immediate UI feedback (button → Stop)
@@ -262,7 +267,7 @@ public final class PipelineRunner: ObservableObject, Identifiable {
     // MARK: - Build
 
     // Callers set `isBuilding = true` (+ reset `cancelRequested`) before calling.
-    private func build(sha: String, pr: BitbucketClient.PullRequest? = nil) async {
+    private func build(sha: String, pr: GitPullRequest? = nil) async {
         currentPR = pr
         buildState = .running(sha: sha)
         runStartedAt = Date()
@@ -274,7 +279,7 @@ public final class PipelineRunner: ObservableObject, Identifiable {
             appendLine("──────── build \(sha.prefix(8)) ────────")
         }
 
-        let client = makeClient()
+        let client = client()
         if config.postStatus {
             await post(client, sha: sha, state: .inProgress, desc: "Building on MacON")
         }
@@ -358,34 +363,32 @@ public final class PipelineRunner: ObservableObject, Identifiable {
         return pipeline
     }
 
-    /// External env passed to the executor: MACON_*/CI + credentials + PR vars,
-    /// merged with secrets (secrets win). MACON_WORKFLOW is set by the executor.
+    /// External env passed to the executor: MACON_*/CI + provider-native vars +
+    /// PR vars, merged with secrets (secrets win). MACON_WORKFLOW is set by the executor.
     private func externalEnv(sha: String) -> [String: String] {
+        let branch = currentPR?.sourceBranch ?? config.branch
         var env: [String: String] = [
             "MACON_COMMIT": sha,
             "MACON_COMMIT_SHORT": String(sha.prefix(8)),
-            "MACON_BRANCH": config.branch,
+            "MACON_BRANCH": branch,
             "MACON_REPO": "\(config.workspace)/\(config.repoSlug)",
             "MACON_BUILD_NUMBER": "\(history.count + 1)",
+            "MACON_PROVIDER": config.provider.rawValue,
             "CI": "true",
         ]
-        if let client = makeClient() {
-            env["BITBUCKET_EMAIL"] = client.email
-            env["BITBUCKET_API_TOKEN"] = client.token
-        }
         if let pr = currentPR {
-            env["MACON_BRANCH"] = pr.sourceBranch
             env["MACON_PR_ID"] = "\(pr.id)"
             env["MACON_PR_TITLE"] = pr.title
             env["MACON_PR_SOURCE"] = pr.sourceBranch
             env["MACON_PR_DEST"] = pr.destBranch
-            env["BITBUCKET_PR_ID"] = "\(pr.id)"
-            env["BITBUCKET_REPO_FULL_NAME"] = "\(config.workspace)/\(config.repoSlug)"
-            env["BITBUCKET_REPO_OWNER"] = config.workspace
-            env["BITBUCKET_REPO_SLUG"] = config.repoSlug
-            env["BITBUCKET_BRANCH"] = pr.sourceBranch
-            env["BITBUCKET_COMMIT"] = sha
-            env["BITBUCKET_BUILD_NUMBER"] = "\(history.count + 1)"
+        }
+        // Provider-native vars (BITBUCKET_* / GITHUB_*) for Danger, fastlane, etc.
+        if let client = client() {
+            for (k, v) in client.stepEnv(workspace: config.workspace, repo: config.repoSlug,
+                                         sha: sha, branch: branch, pr: currentPR,
+                                         buildNumber: history.count + 1) {
+                env[k] = v
+            }
         }
         // Secrets (global + per-pipeline) win over everything.
         for (k, v) in loadSecrets() { env[k] = v }
@@ -405,11 +408,11 @@ public final class PipelineRunner: ObservableObject, Identifiable {
     /// Clone (first run) or fetch + hard-checkout the target commit.
     private func syncRepo(sha: String) async -> Int32 {
         let dir = config.workingDirectory
-        let token = makeClient()?.token ?? ""
-        let authedURL = "https://x-bitbucket-api-token-auth:\(token)@bitbucket.org/"
-            + "\(config.workspace)/\(config.repoSlug).git"
-        let safeURL = "https://x-bitbucket-api-token-auth:***@bitbucket.org/"
-            + "\(config.workspace)/\(config.repoSlug).git"
+        guard let client = client() else {
+            appendLine("✗ No credentials for \(config.provider.label).")
+            return 1
+        }
+        let (authedURL, safeURL) = client.cloneURL(workspace: config.workspace, repo: config.repoSlug)
 
         try? FileManager.default.createDirectory(
             atPath: (dir as NSString).deletingLastPathComponent,
@@ -447,8 +450,8 @@ public final class PipelineRunner: ObservableObject, Identifiable {
         })
     }
 
-    private func post(_ client: BitbucketClient?, sha: String,
-                      state: BitbucketClient.Status, desc: String) async {
+    private func post(_ client: (any GitProvider)?, sha: String,
+                      state: BuildStatus, desc: String) async {
         guard let client else { return }
         do {
             try await client.postBuildStatus(

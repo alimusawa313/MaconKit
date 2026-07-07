@@ -108,8 +108,9 @@ public final class WebhookServer: @unchecked Sendable {
             let method = header.split(separator: "\r\n").first?.split(separator: " ").first.map(String.init) ?? ""
             if method.uppercased() == "POST" {
                 let body = acc.subdata(in: bodyStart..<acc.endIndex)
-                let eventKey = self.headerValue(header, "x-event-key")
-                if let event = Self.parse(body: body, eventKey: eventKey) {
+                let bbEvent = self.headerValue(header, "x-event-key")       // Bitbucket
+                let ghEvent = self.headerValue(header, "x-github-event")    // GitHub
+                if let event = Self.parse(body: body, bitbucketEvent: bbEvent, githubEvent: ghEvent) {
                     self.onEvent(event)
                 }
             }
@@ -148,12 +149,16 @@ public final class WebhookServer: @unchecked Sendable {
 
     // MARK: - Bitbucket payload parsing
 
-    /// Turn a Bitbucket webhook JSON body into a `WebhookEvent`. Handles the two
-    /// event families we build on: `repo:push` and `pullrequest:*`.
-    static func parse(body: Data, eventKey: String?) -> WebhookEvent? {
+    /// Turn a webhook JSON body into a `WebhookEvent`, autodetecting the provider
+    /// from its header (`X-Event-Key` = Bitbucket, `X-GitHub-Event` = GitHub).
+    static func parse(body: Data, bitbucketEvent: String?, githubEvent: String?) -> WebhookEvent? {
         guard let obj = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return nil }
+        if let gh = githubEvent { return parseGitHub(obj, event: gh) }
+        return parseBitbucket(obj, key: bitbucketEvent ?? "")
+    }
+
+    private static func parseBitbucket(_ obj: [String: Any], key: String) -> WebhookEvent? {
         let repo = ((obj["repository"] as? [String: Any])?["full_name"] as? String) ?? ""
-        let key = eventKey ?? ""
 
         // Pull request events.
         if key.hasPrefix("pullrequest"), let pr = obj["pullrequest"] as? [String: Any] {
@@ -178,6 +183,37 @@ public final class WebhookServer: @unchecked Sendable {
                 else { continue }
                 return WebhookEvent(kind: .push, repoFullName: repo, branch: name, commit: sha)
             }
+        }
+        return nil
+    }
+
+    private static func parseGitHub(_ obj: [String: Any], event: String) -> WebhookEvent? {
+        let repo = ((obj["repository"] as? [String: Any])?["full_name"] as? String) ?? ""
+
+        // Pull request events — only the actions that change code.
+        if event == "pull_request", let pr = obj["pull_request"] as? [String: Any] {
+            let action = obj["action"] as? String ?? ""
+            guard ["opened", "reopened", "synchronize"].contains(action) else { return nil }
+            let head = pr["head"] as? [String: Any]
+            let base = pr["base"] as? [String: Any]
+            let sha = (head?["sha"] as? String) ?? ""
+            let src = (head?["ref"] as? String) ?? ""
+            let dst = (base?["ref"] as? String) ?? ""
+            return WebhookEvent(kind: .pullRequest, repoFullName: repo, branch: src, commit: sha,
+                                prID: pr["number"] as? Int, prTitle: pr["title"] as? String,
+                                prSourceBranch: src, prDestBranch: dst)
+        }
+
+        // Push events: ref = "refs/heads/<branch>", after = new head sha.
+        if event == "push" {
+            let ref = obj["ref"] as? String ?? ""
+            let sha = obj["after"] as? String ?? ""
+            let deleted = obj["deleted"] as? Bool ?? false
+            let prefix = "refs/heads/"
+            guard ref.hasPrefix(prefix), !deleted,
+                  !sha.isEmpty, sha != String(repeating: "0", count: 40) else { return nil }
+            return WebhookEvent(kind: .push, repoFullName: repo,
+                                branch: String(ref.dropFirst(prefix.count)), commit: sha)
         }
         return nil
     }

@@ -107,17 +107,33 @@ case "watch":
     // Poll a Bitbucket repo and build every new commit (or PR) here — the
     // headless equivalent of the app's "Start Watching". Runs until Ctrl-C.
     let env = ProcessInfo.processInfo.environment
-    let email = option("email") ?? env["BITBUCKET_EMAIL"] ?? ""
-    let token = option("token") ?? env["BITBUCKET_API_TOKEN"] ?? ""
-    guard !email.isEmpty, !token.isEmpty else {
-        fail("Set --email and --token (or BITBUCKET_EMAIL / BITBUCKET_API_TOKEN env vars).")
+    let providerKind: GitProviderKind = (option("provider")?.lowercased() == "github") ? .github : .bitbucket
+
+    // Build the right client from flags/env for the chosen provider.
+    let makeProviderClient: () -> (any GitProvider)?
+    switch providerKind {
+    case .github:
+        let token = option("token") ?? env["GITHUB_TOKEN"] ?? ""
+        guard !token.isEmpty else {
+            fail("GitHub: set --token (or GITHUB_TOKEN env var) to a PAT with repo access.")
+        }
+        makeProviderClient = { GitHubClient(token: token) }
+    case .bitbucket:
+        let email = option("email") ?? env["BITBUCKET_EMAIL"] ?? ""
+        let token = option("token") ?? env["BITBUCKET_API_TOKEN"] ?? ""
+        guard !email.isEmpty, !token.isEmpty else {
+            fail("Bitbucket: set --email and --token (or BITBUCKET_EMAIL / BITBUCKET_API_TOKEN).")
+        }
+        makeProviderClient = { BitbucketClient(email: email, token: token) }
     }
+
     guard let ws = option("workspace"), let repo = option("repo") else {
         fail("Need --workspace WS and --repo SLUG.")
     }
 
     var cfg = PipelineConfig()
     cfg.name = "\(ws)/\(repo)"
+    cfg.provider = providerKind
     cfg.workspace = ws
     cfg.repoSlug = repo
     cfg.branch = option("branch") ?? "main"
@@ -131,12 +147,12 @@ case "watch":
     cfg.postStatus = !flag("no-status")
     let home = FileManager.default.homeDirectoryForCurrentUser.path
     cfg.workingDirectory = option("dir") ?? "\(home)/macon-ci/\(repo)"
-    cfg.id = stableID("\(ws)/\(repo)@\(cfg.branch):\(cfg.watchMode.rawValue)")
+    cfg.id = stableID("\(providerKind.rawValue):\(ws)/\(repo)@\(cfg.branch):\(cfg.watchMode.rawValue)")
 
     // Retain the runner + log subscription for the life of the process.
     let keepAlive = await MainActor.run { () -> (PipelineRunner, AnyCancellable) in
         let runner = PipelineRunner(config: cfg)
-        runner.makeClient = { BitbucketClient(email: email, token: token) }
+        runner.makeClient = { _ in makeProviderClient() }
         runner.loadGlobalSecrets = { [:] }   // CLI secrets come from the inherited shell env
         var printed = 0
         let sub = runner.$log.sink { lines in
@@ -159,6 +175,8 @@ case "help", "--help", "-h":
                                    run a workflow once in the given repo dir
       watch --workspace WS --repo SLUG [options]
                                    build new commits here, until Ctrl-C
+        --provider bitbucket|github   git host (default: bitbucket)
+                                   GitHub: --token/GITHUB_TOKEN; workspace = owner/org
         --branch B                 branch to watch (default: main)
         --prs [--pr-target B]      watch open PRs instead of a branch
         --webhook [--port N]       push mode: listen for Bitbucket webhooks (default port 8787)

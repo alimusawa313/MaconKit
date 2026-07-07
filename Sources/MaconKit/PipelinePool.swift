@@ -21,6 +21,11 @@ public final class PipelinePool: ObservableObject {
         didSet { Keychain.set(apiToken, account: "apiToken") }
     }
 
+    /// GitHub Personal Access Token (for pipelines whose provider is GitHub).
+    @Published public var githubToken: String {
+        didSet { Keychain.set(githubToken, account: "githubToken") }
+    }
+
     /// Names of global secret env vars (shared by every pipeline). Values live in
     /// the Keychain; only names are persisted here.
     @Published public private(set) var globalSecretKeys: [String] = []
@@ -36,6 +41,7 @@ public final class PipelinePool: ObservableObject {
     public init() {
         email = defaults.string(forKey: Keys.email) ?? ""
         apiToken = Keychain.get(account: "apiToken")
+        githubToken = Keychain.get(account: "githubToken")
         globalSecretKeys = defaults.stringArray(forKey: Keys.globalSecretKeys) ?? []
         for cfg in Self.load() {
             add(runnerFor: cfg)
@@ -74,10 +80,29 @@ public final class PipelinePool: ObservableObject {
 
     public var credentials: BitbucketCredentials { .init(email: email, apiToken: apiToken) }
 
-    public func makeClient() -> BitbucketClient? {
-        guard credentials.isComplete else { return nil }
-        return BitbucketClient(email: email, token: apiToken)
+    /// Whether credentials are set for a given provider.
+    public func hasCredentials(for kind: GitProviderKind) -> Bool {
+        switch kind {
+        case .bitbucket: return credentials.isComplete
+        case .github:    return !githubToken.trimmingCharacters(in: .whitespaces).isEmpty
+        }
     }
+
+    /// A client for the given provider, or nil if its credentials aren't set.
+    public func makeClient(for kind: GitProviderKind) -> (any GitProvider)? {
+        switch kind {
+        case .bitbucket:
+            guard credentials.isComplete else { return nil }
+            return BitbucketClient(email: email, token: apiToken)
+        case .github:
+            let t = githubToken.trimmingCharacters(in: .whitespaces)
+            guard !t.isEmpty else { return nil }
+            return GitHubClient(token: t)
+        }
+    }
+
+    /// Bitbucket-only convenience kept for existing callers/UI.
+    public func makeClient() -> (any GitProvider)? { makeClient(for: .bitbucket) }
 
     // MARK: - Mutating
 
@@ -95,7 +120,7 @@ public final class PipelinePool: ObservableObject {
     @discardableResult
     private func add(runnerFor cfg: PipelineConfig) -> PipelineRunner {
         let runner = PipelineRunner(config: cfg)
-        runner.makeClient = { [weak self] in self?.makeClient() }
+        runner.makeClient = { [weak self] kind in self?.makeClient(for: kind) }
         runner.loadGlobalSecrets = { [weak self] in self?.globalSecrets() ?? [:] }
         // Forward child changes so the menu bar / aggregate counts stay in sync.
         runner.objectWillChange

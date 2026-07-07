@@ -27,18 +27,30 @@ matching `macon.yml` workflow, and posts build status back. It runs until Ctrl-C
 `--token` or the `BITBUCKET_EMAIL` / `BITBUCKET_API_TOKEN` env vars; secrets are
 inherited from the shell env, same as `run`.
 
+It works with **Bitbucket** or **GitHub** (`--provider`, default `bitbucket`).
+For GitHub, `--workspace` is the owner/org and auth is a PAT via `--token` or
+`GITHUB_TOKEN`:
+
+```sh
+# --- Bitbucket ---
+export BITBUCKET_EMAIL=you@example.com BITBUCKET_API_TOKEN=…
+macon watch --workspace academytools --repo planpal-ios-learner-2 --branch main
+
+# --- GitHub ---
+export GITHUB_TOKEN=ghp_…
+macon watch --provider github --workspace my-org --repo my-app --branch main
+```
+
 There are two trigger modes — same as the app:
 
 ```sh
-export BITBUCKET_EMAIL=you@example.com BITBUCKET_API_TOKEN=…
-
-# Polling (default): ask Bitbucket every 30s, build new commits on main.
+# Polling (default): ask the host every 30s, build new commits on main.
 macon watch --workspace academytools --repo planpal-ios-learner-2 --branch main
 
 # Polling, open PRs targeting main instead of a branch.
 macon watch --workspace academytools --repo planpal-ios-learner-2 --prs --pr-target main
 
-# Webhook (push): build the instant Bitbucket calls us — no lag, no idle polling.
+# Webhook (push): build the instant the host calls us — no lag, no idle polling.
 macon watch --workspace academytools --repo planpal-ios-learner-2 --branch main \
             --webhook --port 8787
 ```

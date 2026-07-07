@@ -25,7 +25,9 @@ public enum TriggerMode: String, Codable, CaseIterable {
 public struct PipelineConfig: Identifiable, Codable, Equatable {
     public var id = UUID()
     public var name = "New Pipeline"
-    public var workspace = ""        // e.g. "academytools"
+    /// Which git host this pipeline watches (Bitbucket or GitHub).
+    public var provider: GitProviderKind = .bitbucket
+    public var workspace = ""        // Bitbucket workspace, or GitHub owner/org
     public var repoSlug = ""         // e.g. "planpal-ios-learner-2"
     public var branch = "main"
     /// Watch a single branch, or all open pull requests.
@@ -62,6 +64,7 @@ public struct PipelineConfig: Identifiable, Codable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
         name = (try? c.decode(String.self, forKey: .name)) ?? "New Pipeline"
+        provider = (try? c.decode(GitProviderKind.self, forKey: .provider)) ?? .bitbucket
         workspace = (try? c.decode(String.self, forKey: .workspace)) ?? ""
         repoSlug = (try? c.decode(String.self, forKey: .repoSlug)) ?? ""
         branch = (try? c.decode(String.self, forKey: .branch)) ?? "main"
