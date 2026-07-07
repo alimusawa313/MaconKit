@@ -64,6 +64,23 @@ and/or Pull Request events) — same LAN, a port-forward, or a tunnel like
 Run `macon help` for the full option list (`--dir`, `--every`, `--workflow`,
 `--file`, `--no-status`).
 
+### Bring your app setup to the terminal
+
+Set everything up in the app, then **Settings → Export Configuration…** writes a
+`macon-export.json`. Run all of it headless — no flags to retype:
+
+```sh
+macon pipelines macon-export.json          # see what's inside
+macon watch --config macon-export.json     # watch them all
+macon watch --config macon-export.json --pipeline "PlanPal iOS"   # just one
+```
+
+Export **without** secrets (default) for a config-only file — provide token/secret
+values via the shell env when you run (`BITBUCKET_API_TOKEN`, `GITHUB_TOKEN`, plus
+your own like `SLACK_URL`). Export **with** secrets for a self-contained file
+(contains tokens in plain text — keep it private). The app's **Import…** button
+loads a file back, so it doubles as a way to move a setup between machines.
+
 ## Install now (no Homebrew)
 
 ```sh

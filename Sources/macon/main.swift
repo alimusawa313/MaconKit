@@ -9,6 +9,10 @@ import MaconKit
 //   macon run [--workflow NAME] [--branch B] [path]   run a workflow here
 //   macon watch --workspace WS --repo SLUG  poll Bitbucket & build here
 
+// Line-buffer stdout so `macon watch` logs appear promptly when redirected to a
+// file or pipe (nohup/tmux/launchd), not just when attached to a terminal.
+setvbuf(stdout, nil, _IOLBF, 0)
+
 let args = Array(CommandLine.arguments.dropFirst())
 let command = args.first ?? "help"
 
@@ -103,6 +107,56 @@ case "run":
     }
     exit(code)
 
+case "watch" where option("config") != nil:
+    // Watch every pipeline from an app export file (macon-export.json). Creds and
+    // secrets come from the file if it was exported with them, else from the env.
+    let path = option("config")!
+    guard let data = FileManager.default.contents(atPath: path),
+          let bundle = try? MaconExport.decoded(from: data) else {
+        fail("Couldn't read or parse config at \(path).")
+    }
+    let env = ProcessInfo.processInfo.environment
+    let bbEmail = bundle.bitbucketEmail ?? env["BITBUCKET_EMAIL"] ?? ""
+    let bbToken = bundle.bitbucketToken ?? env["BITBUCKET_API_TOKEN"] ?? ""
+    let ghToken = bundle.githubToken ?? env["GITHUB_TOKEN"] ?? ""
+
+    var configs = bundle.pipelines
+    if let only = option("pipeline") {
+        configs = configs.filter { $0.name == only || $0.id.uuidString == only }
+    }
+    guard !configs.isEmpty else { fail("No matching pipelines in \(path).") }
+    print("▶ Watching \(configs.count) pipeline(s) from \(path)"
+          + (bundle.includesSecrets ? " (with embedded secrets)." : "; secrets from env."))
+
+    let subs = await MainActor.run { () -> [AnyCancellable] in
+        var subs: [AnyCancellable] = []
+        for cfg in configs {
+            let runner = PipelineRunner(config: cfg)
+            runner.makeClient = { kind in
+                switch kind {
+                case .bitbucket: return (bbEmail.isEmpty || bbToken.isEmpty) ? nil
+                    : BitbucketClient(email: bbEmail, token: bbToken)
+                case .github: return ghToken.isEmpty ? nil : GitHubClient(token: ghToken)
+                }
+            }
+            // Global + this pipeline's secrets from the bundle (empty → env is used).
+            let global = bundle.secrets?["global"] ?? [:]
+            let own = bundle.secrets?[cfg.id.uuidString] ?? [:]
+            let merged = global.merging(own) { _, b in b }
+            runner.loadGlobalSecrets = { merged }
+            let label = cfg.name
+            var printed = 0
+            let sub = runner.$log.sink { lines in
+                while printed < lines.count { print("[\(label)] \(lines[printed].text)"); printed += 1 }
+            }
+            subs.append(sub)
+            runner.startWatching()
+        }
+        return subs
+    }
+    _ = subs
+    while true { try? await Task.sleep(for: .seconds(3600)) }
+
 case "watch":
     // Poll a Bitbucket repo and build every new commit (or PR) here — the
     // headless equivalent of the app's "Start Watching". Runs until Ctrl-C.
@@ -165,14 +219,32 @@ case "watch":
     // Sleep forever; the poll loop and builds run on their own tasks.
     while true { try? await Task.sleep(for: .seconds(3600)) }
 
+case "pipelines":
+    // Summarize an app export file.
+    let path = positional ?? option("config") ?? "macon-export.json"
+    guard let data = FileManager.default.contents(atPath: path),
+          let bundle = try? MaconExport.decoded(from: data) else {
+        fail("Couldn't read or parse \(path).")
+    }
+    print("\(path) — \(bundle.pipelines.count) pipeline(s)"
+          + (bundle.includesSecrets ? ", includes secrets" : ", config only"))
+    for cfg in bundle.pipelines {
+        let target = cfg.watchMode == .branch ? cfg.branch : "PRs→\(cfg.prTargetBranch.isEmpty ? "any" : cfg.prTargetBranch)"
+        print("  • \(cfg.name)  [\(cfg.provider.rawValue)] \(cfg.workspace)/\(cfg.repoSlug) @ \(target) "
+              + "(\(cfg.triggerMode.rawValue))")
+    }
+
 case "help", "--help", "-h":
     print("""
     macon — local CI runner (MaconKit)
     Commands:
       version                      print version
       lint [path]                  parse and summarize a macon.yml
+      pipelines [file.json]        list pipelines in an app export file
       run [--workflow N] [--branch B] [--file macon.yml] [path]
                                    run a workflow once in the given repo dir
+      watch --config file.json [--pipeline NAME]
+                                   watch pipelines exported from the app
       watch --workspace WS --repo SLUG [options]
                                    build new commits here, until Ctrl-C
         --provider bitbucket|github   git host (default: bitbucket)

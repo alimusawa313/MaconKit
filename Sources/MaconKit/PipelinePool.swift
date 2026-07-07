@@ -141,6 +141,55 @@ public final class PipelinePool: ObservableObject {
     public func startAll() { for p in pipelines { p.startWatching() } }
     public func stopAll()  { for p in pipelines where p.isWatching { p.stopWatching() } }
 
+    // MARK: - Portable export / import
+
+    /// Snapshot the whole setup for use by the CLI or another machine. Secret and
+    /// token values are included only when `includeSecrets` is true.
+    public func makeExport(includeSecrets: Bool) -> MaconExport {
+        var bundle = MaconExport(pipelines: pipelines.map(\.config))
+        bundle.bitbucketEmail = email.isEmpty ? nil : email
+        guard includeSecrets else { return bundle }
+
+        bundle.bitbucketToken = apiToken.isEmpty ? nil : apiToken
+        bundle.githubToken = githubToken.isEmpty ? nil : githubToken
+
+        var secrets: [String: [String: String]] = [:]
+        let global = globalSecrets()
+        if !global.isEmpty { secrets["global"] = global }
+        for runner in pipelines {
+            var s: [String: String] = [:]
+            for key in runner.config.secretKeys {
+                let v = Keychain.get(account: "secret:\(runner.config.id.uuidString):\(key)")
+                if !v.isEmpty { s[key] = v }
+            }
+            if !s.isEmpty { secrets[runner.config.id.uuidString] = s }
+        }
+        if !secrets.isEmpty { bundle.secrets = secrets }
+        return bundle
+    }
+
+    /// Load a bundle into the pool (adds its pipelines; applies creds/secrets if present).
+    public func importBundle(_ bundle: MaconExport, replaceExisting: Bool) {
+        if replaceExisting {
+            for p in pipelines { p.stopWatching() }
+            pipelines.removeAll()
+        }
+        if let e = bundle.bitbucketEmail, !e.isEmpty { email = e }
+        if let t = bundle.bitbucketToken, !t.isEmpty { apiToken = t }
+        if let t = bundle.githubToken, !t.isEmpty { githubToken = t }
+
+        if let global = bundle.secrets?["global"] {
+            setGlobalSecrets(global.map { ($0.key, $0.value) })
+        }
+        for cfg in bundle.pipelines {
+            add(runnerFor: cfg)
+            if let s = bundle.secrets?[cfg.id.uuidString] {
+                for (k, v) in s { Keychain.set(v, account: "secret:\(cfg.id.uuidString):\(k)") }
+            }
+        }
+        persist()
+    }
+
     public var watchingCount: Int { pipelines.filter(\.isWatching).count }
 
     // MARK: - Persistence
