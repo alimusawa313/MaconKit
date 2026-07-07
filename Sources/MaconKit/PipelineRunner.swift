@@ -41,6 +41,7 @@ public final class PipelineRunner: ObservableObject, Identifiable {
         func cancel() { cancelled = true; currentProcess?.terminate() }
     }
     private var control = ExecutionControl()
+    private var webhookServer: WebhookServer?
     private var nextLineID = 0
     private let maxLines = 4000
     private let statusKey = "macon-ci"
@@ -86,16 +87,79 @@ public final class PipelineRunner: ObservableObject, Identifiable {
             let f = config.prTargetBranch.trimmingCharacters(in: .whitespaces)
             target = f.isEmpty ? "open PRs" : "open PRs → \(f)"
         }
-        appendLine("👀 Watching \(config.workspace)/\(config.repoSlug) — \(target) "
-                   + "(every \(config.pollSeconds)s).")
-        pollTask = Task { @MainActor in await self.pollLoop() }
+
+        switch config.triggerMode {
+        case .polling:
+            appendLine("👀 Polling \(config.workspace)/\(config.repoSlug) — \(target) "
+                       + "(every \(config.pollSeconds)s).")
+            pollTask = Task { @MainActor in await self.pollLoop() }
+        case .webhook:
+            startWebhookServer(target: target)
+        }
     }
 
     public func stopWatching() {
         isWatching = false
         pollTask?.cancel()
         pollTask = nil
+        webhookServer?.stop()
+        webhookServer = nil
         appendLine("🛑 Stopped watching.")
+    }
+
+    // MARK: - Webhook trigger
+
+    private func startWebhookServer(target: String) {
+        let port = UInt16(clamping: config.webhookPort)
+        let server = WebhookServer(
+            port: port,
+            onLog: { [weak self] line in Task { @MainActor in self?.appendLine(line) } },
+            onEvent: { [weak self] event in Task { @MainActor in self?.handleWebhook(event) } })
+        server.start()
+        webhookServer = server
+        appendLine("🪝 Webhook listening on :\(port) — \(target). "
+                   + "Point Bitbucket at http://<this-mac>:\(port)/ (repo settings → Webhooks).")
+    }
+
+    /// Decide whether an incoming webhook event should build, then build it.
+    private func handleWebhook(_ event: WebhookEvent) {
+        guard isWatching else { return }
+        lastPoll = Date()
+
+        // If the payload names a repo, ignore events for a different one.
+        let expected = "\(config.workspace)/\(config.repoSlug)"
+        if !event.repoFullName.isEmpty && event.repoFullName != expected { return }
+
+        if isBuilding {
+            appendLine("🔔 Event received while building — ignoring (will catch the next).")
+            return
+        }
+
+        switch config.watchMode {
+        case .branch:
+            guard event.kind == .push, event.branch == config.branch else { return }
+            guard event.commit != lastBuiltSHA else { return }
+            appendLine("🔔 Webhook: push \(event.commit.prefix(8)) on \(config.branch).")
+            isBuilding = true
+            control = ExecutionControl()
+            Task { @MainActor in await self.build(sha: event.commit) }
+
+        case .pullRequests:
+            guard event.kind == .pullRequest, let prID = event.prID else { return }
+            let filter = config.prTargetBranch.trimmingCharacters(in: .whitespaces)
+            if !filter.isEmpty, event.prDestBranch != filter { return }
+            guard lastBuiltPRSHAs[prID] != event.commit else { return }
+            let pr = BitbucketClient.PullRequest(
+                id: prID, title: event.prTitle ?? "PR #\(prID)",
+                sourceBranch: event.prSourceBranch ?? event.branch,
+                sourceCommit: event.commit,
+                destBranch: event.prDestBranch ?? "")
+            lastBuiltPRSHAs[prID] = event.commit
+            appendLine("🔔 Webhook: PR #\(prID) “\(pr.title)” → \(event.commit.prefix(8)).")
+            isBuilding = true
+            control = ExecutionControl()
+            Task { @MainActor in await self.build(sha: event.commit, pr: pr) }
+        }
     }
 
     private func pollLoop() async {

@@ -21,19 +21,33 @@ ASC_KEY_ID=… ASC_ISSUER_ID=… ASC_KEY_CONTENT=… macon run --workflow beta
 ```
 
 `macon watch` is the headless equivalent of the app's **Start Watching**: it
-polls a Bitbucket repo, clones/checks out each new commit (or open PR), runs the
+learns about new commits (or open PRs), clones/checks out each one, runs the
 matching `macon.yml` workflow, and posts build status back. It runs until Ctrl-C
 — ideal under `tmux`, `nohup`, or a `launchd` job. Auth comes from `--email` /
 `--token` or the `BITBUCKET_EMAIL` / `BITBUCKET_API_TOKEN` env vars; secrets are
 inherited from the shell env, same as `run`.
 
+There are two trigger modes — same as the app:
+
 ```sh
 export BITBUCKET_EMAIL=you@example.com BITBUCKET_API_TOKEN=…
-# watch main, build every new commit:
+
+# Polling (default): ask Bitbucket every 30s, build new commits on main.
 macon watch --workspace academytools --repo planpal-ios-learner-2 --branch main
-# watch open PRs targeting main instead:
+
+# Polling, open PRs targeting main instead of a branch.
 macon watch --workspace academytools --repo planpal-ios-learner-2 --prs --pr-target main
+
+# Webhook (push): build the instant Bitbucket calls us — no lag, no idle polling.
+macon watch --workspace academytools --repo planpal-ios-learner-2 --branch main \
+            --webhook --port 8787
 ```
+
+**Polling** works anywhere (only needs outbound HTTPS) but lags up to the poll
+interval. **Webhook** is instant but the Mac must be reachable at the URL you
+register in Bitbucket (**repo Settings → Webhooks** → `http://<mac>:8787/`, Push
+and/or Pull Request events) — same LAN, a port-forward, or a tunnel like
+`cloudflared`/`ngrok`. macOS may prompt once to allow incoming connections.
 
 Run `macon help` for the full option list (`--dir`, `--every`, `--workflow`,
 `--file`, `--no-status`).

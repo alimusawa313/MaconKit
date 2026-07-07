@@ -12,6 +12,15 @@ public enum WatchMode: String, Codable, CaseIterable {
     public var label: String { self == .branch ? "Branch" : "Pull Requests" }
 }
 
+/// How a pipeline learns about new commits.
+public enum TriggerMode: String, Codable, CaseIterable {
+    /// Ask Bitbucket every `pollSeconds` (simple, works anywhere, up to N seconds lag).
+    case polling
+    /// Bitbucket POSTs us the instant something lands (no lag, needs a reachable URL).
+    case webhook
+    public var label: String { self == .polling ? "Polling" : "Webhook" }
+}
+
 /// A local CI pipeline: watch a branch (or open PRs) of a repo, build here.
 public struct PipelineConfig: Identifiable, Codable, Equatable {
     public var id = UUID()
@@ -33,7 +42,12 @@ public struct PipelineConfig: Identifiable, Codable, Equatable {
     public var buildCommand = "bundle install && bundle exec fastlane test device:\"iPhone 17 Pro\""
     /// Where the repo is cloned/checked out for this pipeline.
     public var workingDirectory = ""
+    /// Polling (ask every `pollSeconds`) vs webhook (Bitbucket pushes to us).
+    public var triggerMode: TriggerMode = .polling
     public var pollSeconds = 30
+    /// Port the webhook listener binds to (webhook mode only). Each webhook
+    /// pipeline needs its own port.
+    public var webhookPort = 8787
     /// Post build status back to the commit on Bitbucket.
     public var postStatus = true
     /// Names of secret env vars (e.g. ASC_KEY_ID). Values live in the Keychain,
@@ -58,7 +72,9 @@ public struct PipelineConfig: Identifiable, Codable, Equatable {
         buildCommand = (try? c.decode(String.self, forKey: .buildCommand))
             ?? "bundle install && bundle exec fastlane test device:\"iPhone 17 Pro\""
         workingDirectory = (try? c.decode(String.self, forKey: .workingDirectory)) ?? ""
+        triggerMode = (try? c.decode(TriggerMode.self, forKey: .triggerMode)) ?? .polling
         pollSeconds = (try? c.decode(Int.self, forKey: .pollSeconds)) ?? 30
+        webhookPort = (try? c.decode(Int.self, forKey: .webhookPort)) ?? 8787
         postStatus = (try? c.decode(Bool.self, forKey: .postStatus)) ?? true
         secretKeys = (try? c.decode([String].self, forKey: .secretKeys)) ?? []
     }

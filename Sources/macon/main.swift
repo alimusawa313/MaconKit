@@ -126,6 +126,8 @@ case "watch":
     if let n = option("workflow") { cfg.workflow = n }
     if let f = option("file") { cfg.pipelineFile = f }
     if let e = option("every"), let s = Int(e) { cfg.pollSeconds = s }
+    cfg.triggerMode = flag("webhook") ? .webhook : .polling
+    if let p = option("port"), let n = Int(p) { cfg.webhookPort = n }
     cfg.postStatus = !flag("no-status")
     let home = FileManager.default.homeDirectoryForCurrentUser.path
     cfg.workingDirectory = option("dir") ?? "\(home)/macon-ci/\(repo)"
@@ -156,13 +158,15 @@ case "help", "--help", "-h":
       run [--workflow N] [--branch B] [--file macon.yml] [path]
                                    run a workflow once in the given repo dir
       watch --workspace WS --repo SLUG [options]
-                                   poll Bitbucket & build new commits here (Ctrl-C to stop)
+                                   build new commits here, until Ctrl-C
         --branch B                 branch to watch (default: main)
         --prs [--pr-target B]      watch open PRs instead of a branch
+        --webhook [--port N]       push mode: listen for Bitbucket webhooks (default port 8787)
+                                   (default is polling — ask Bitbucket every --every seconds)
+        --every SECS               poll interval for polling mode (default: 30)
         --workflow N               macon.yml workflow to run (default: auto by trigger)
         --file macon.yml           pipeline file to look for (default: macon.yml)
         --dir PATH                 checkout dir (default: ~/macon-ci/<repo>)
-        --every SECS               poll interval (default: 30)
         --no-status                don't post build status back to Bitbucket
         --email E --token T        Bitbucket auth (or env BITBUCKET_EMAIL / BITBUCKET_API_TOKEN)
     """)
