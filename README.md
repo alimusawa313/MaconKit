@@ -13,6 +13,9 @@ macon run [--workflow N] [--branch B] [--file macon.yml] [path]
 macon watch --workspace WS --repo SLUG [--branch B | --prs] [options]
 ```
 
+See **[CLI.md](CLI.md)** for the full command reference (every flag, auth, trigger
+modes, and recipes).
+
 `macon run` executes a `macon.yml` workflow in a repo directory (the current
 checkout) and streams output, exiting non-zero on failure — so it drops into a
 git hook, cron, or another CI. Secrets are read from the inherited shell env:
