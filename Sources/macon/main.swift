@@ -68,11 +68,17 @@ func option(_ name: String) -> String? {
     return args[i + 1]
 }
 var positional: String? {
-    // last arg that isn't a flag or a flag's value
+    // last arg (after the command) that isn't a flag or a flag's value.
+    // Plain loop — avoids EnumeratedSequence collection APIs that vary by toolchain.
     var skip = Set<Int>()
     for (i, a) in args.enumerated() where a.hasPrefix("--") { skip.insert(i); skip.insert(i + 1) }
-    return args.enumerated().dropFirst()
-        .last(where: { !skip.contains($0.offset) && !$0.element.hasPrefix("--") })?.element
+    var result: String?
+    for (i, a) in args.enumerated() {
+        if i == 0 { continue }                      // the command itself
+        if skip.contains(i) || a.hasPrefix("--") { continue }
+        result = a
+    }
+    return result
 }
 
 switch command {
