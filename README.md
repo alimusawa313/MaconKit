@@ -85,6 +85,22 @@ your own like `SLACK_URL`). Export **with** secrets for a self-contained file
 (contains tokens in plain text — keep it private). The app's **Import…** button
 loads a file back, so it doubles as a way to move a setup between machines.
 
+### Monitor from your phone: `--companion`
+
+Add `--companion` to any `watch` to serve the **[MacOn companion app](https://github.com/alimusawa313/MacON_Companion)**
+(iPhone/iPad) — watch builds and tail logs live:
+
+```sh
+macon watch --workspace acme --repo app --branch main --companion
+```
+
+It prints a pairing **address + one-time code**; enter them in the app's *Add
+runner* screen to get a device token (stored in the iOS Keychain). The code is
+single-use and expires. On a headless/EC2 Mac, read the code over SSH and expose
+the port via a `cloudflared` tunnel — the app speaks HTTPS/WSS. Manage devices with
+`macon companion devices | revoke <prefix> | revoke-all`. Full details in
+**[CLI.md](CLI.md#macon-companion--iphoneipad-app)**.
+
 ## First run: `macon init`
 
 Before watching anything, check the machine has what an iOS build needs:

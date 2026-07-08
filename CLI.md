@@ -23,6 +23,7 @@ macon run [options] [path]        run one workflow once, here
 macon watch [options]             watch a repo and build new commits (until Ctrl-C)
 macon watch --config file.json    watch pipelines exported from the app
 macon service <install|…>         run a watch as a launchd service
+macon companion <devices|…>       manage companion-app (iPhone/iPad) pairings
 macon help                        show usage
 ```
 
@@ -154,6 +155,10 @@ macon watch --workspace WS --repo SLUG [options]
 | `--dir PATH` | `~/macon-ci/<repo>` | checkout directory |
 | `--no-status` | off | don't post build status back |
 | `--email E` `--token T` | env | auth (see [Authentication](#authentication)) |
+| `--companion` | off | serve the [companion app](#macon-companion--iphoneipad-app) (monitor builds + live logs) |
+| `--companion-port N` | `8899` | companion server port |
+| `--pair-ttl MIN` | `15` | pairing-code lifetime |
+| `--pair-code CODE` | random | use a fixed pairing code instead of a random one |
 
 ### From an app export (multiple pipelines)
 
@@ -185,6 +190,62 @@ macon service uninstall [--label NAME]    # stop and remove
 `~/Library/Logs/macon/<label>.log`. Credentials/secrets present in your shell at
 install time (`BITBUCKET_*`, `GITHUB_TOKEN`, `ASC_*`, `SLACK_URL`,
 `MACON_WEBHOOK_SECRET`) are copied into the LaunchAgent so the service can build.
+
+---
+
+## `macon companion` — iPhone/iPad app
+
+The [MacOn companion app](https://github.com/alimusawa313/MacON_Companion) lets you
+**monitor builds and tail logs live** from your phone or iPad. Add `--companion` to
+any `watch` to serve it:
+
+```sh
+macon watch --workspace acme --repo app --branch main --companion
+```
+
+On start it prints a pairing box — an **address** and a one-time **code**:
+
+```
+┌─ Pair the MacOn companion app ──────────────────────
+│  Address:  alis-mac.local:8899
+│  Code:     K7QP-2M9X-4RTD   ·  valid 15 min, one device
+└──────────────────────────────────────────────────────
+```
+
+In the app: **Add runner** → enter that address + code. It exchanges the code for a
+long-lived device token (stored in the iOS Keychain) and reconnects silently after.
+The code is **single-use** and expires; brute force is rate-limited.
+
+### Headless / EC2 Macs
+
+There's no screen to read on a remote Mac — the code prints to the log, so grab it
+over SSH. Expose the port through a **cloudflared tunnel** and pair the app against
+the tunnel host (the app talks HTTPS/WSS):
+
+```sh
+cloudflared tunnel --url http://localhost:8899   # → https://<name>.trycloudflare.com
+# In the app, use that hostname as the address.
+```
+
+### Managing devices
+
+File-based, so it works even with no server running:
+
+```sh
+macon companion devices             # list paired iPhones/iPads
+macon companion revoke <prefix>     # revoke one by token prefix (from `devices`)
+macon companion revoke-all          # revoke every device
+```
+
+| `watch` flag | Default | Meaning |
+|---|---|---|
+| `--companion` | off | serve the companion app |
+| `--companion-port N` | `8899` | server port |
+| `--pair-ttl MIN` | `15` | pairing-code lifetime |
+| `--pair-code CODE` | random | pin a known code (e.g. to pair a second device later) |
+
+> **Scope:** the app currently monitors builds and streams logs. Screen streaming
+> (watch the Mac/simulator) is a planned later phase.
 
 ---
 
@@ -253,6 +314,9 @@ tail -f ~/macon.log
 
 # one-off release build from a checkout
 macon run --workflow beta ~/src/planpal
+
+# watch main AND serve the iPhone/iPad companion app
+macon watch --workspace acme --repo app --branch main --companion
 ```
 
 ## Exit codes
