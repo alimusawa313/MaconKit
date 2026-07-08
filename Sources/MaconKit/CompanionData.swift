@@ -16,18 +16,19 @@ import Foundation
 
 @MainActor
 public final class CompanionData {
-    private let runners: [PipelineRunner]
+    /// Read live so pipelines added/removed in the app are reflected immediately.
+    private let runnersProvider: () -> [PipelineRunner]
     private let runnerName: String
     private let historyLimit = 20
 
-    public init(runners: [PipelineRunner], runnerName: String) {
-        self.runners = runners
+    public init(runners: @escaping () -> [PipelineRunner], runnerName: String) {
+        self.runnersProvider = runners
         self.runnerName = runnerName
     }
 
     public func builds() -> CompanionBuildsDTO {
         var out: [CompanionBuildDTO] = []
-        for r in runners {
+        for r in runnersProvider() {
             let repo = "\(r.config.workspace)/\(r.config.repoSlug)"
             let pid = r.config.id.uuidString
 
@@ -79,7 +80,7 @@ public final class CompanionData {
         guard let sep = buildID.firstIndex(of: "~") else { return nil }
         let pid = String(buildID[..<sep])
         let part = String(buildID[buildID.index(after: sep)...])
-        guard let runner = runners.first(where: { $0.config.id.uuidString == pid }) else { return nil }
+        guard let runner = runnersProvider().first(where: { $0.config.id.uuidString == pid }) else { return nil }
         return (runner, part)
     }
 

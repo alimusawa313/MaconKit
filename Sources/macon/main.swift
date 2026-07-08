@@ -134,7 +134,7 @@ func startCompanion(_ runners: [PipelineRunner], name: String) -> CompanionServi
     let port = UInt16(clamping: Int(option("companion-port") ?? "8899") ?? 8899)
     let ttlMin = Int(option("pair-ttl") ?? "15") ?? 15
     let store = PairingStore()
-    let service = CompanionService(runners: runners, runnerName: name,
+    let service = CompanionService(runners: { runners }, runnerName: name,
                                    port: port, store: store) { print("[companion] \($0)") }
     service.start()
 

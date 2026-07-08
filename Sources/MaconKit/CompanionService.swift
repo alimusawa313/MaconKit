@@ -14,7 +14,7 @@ public final class CompanionService {
     private let server: CompanionServer
     public let store: PairingStore
 
-    public init(runners: [PipelineRunner],
+    public init(runners: @escaping () -> [PipelineRunner],
                 runnerName: String,
                 port: UInt16,
                 store: PairingStore,
