@@ -62,6 +62,30 @@ func probe(_ command: String) -> (code: Int32, output: String) {
     return (p.terminationStatus, s)
 }
 
+/// Print installed iOS simulator runtimes and device types. `full` lists every
+/// device type; otherwise just a count (keeps `init` output tidy).
+func showSimulators(full: Bool) {
+    let rtRaw = capture("xcrun simctl list runtimes 2>/dev/null | grep -i ios", cwd: ".")
+    let runtimes = rtRaw.split(separator: "\n").compactMap {
+        $0.components(separatedBy: " (").first?.trimmingCharacters(in: .whitespaces)
+    }.filter { !$0.isEmpty }
+    if runtimes.isEmpty {
+        print("  iOS runtimes: none — add one with `macon sims install <version>`")
+    } else {
+        print("  iOS runtimes: \(runtimes.joined(separator: ", "))")
+    }
+    let dtRaw = capture("xcrun simctl list devicetypes 2>/dev/null | grep -iE 'iPhone|iPad'", cwd: ".")
+    let types = dtRaw.split(separator: "\n").compactMap {
+        $0.components(separatedBy: " (").first?.trimmingCharacters(in: .whitespaces)
+    }.filter { !$0.isEmpty }
+    if full {
+        print("  Device types (\(types.count)):")
+        for t in types { print("    • \(t)") }
+    } else {
+        print("  Device types: \(types.count) available — see `macon sims list`")
+    }
+}
+
 /// Parse `--flag value` options and a trailing positional argument.
 func option(_ name: String) -> String? {
     guard let i = args.firstIndex(of: "--\(name)"), i + 1 < args.count else { return nil }
@@ -185,8 +209,9 @@ case "init", "doctor":
     if let n = Int(sims), n > 0 {
         print("  ✓ iOS simulators  \(n) runtime(s)")
     } else {
-        print("  ✗ iOS simulators — none installed  (xcodebuild -downloadPlatform iOS)")
+        print("  ✗ iOS simulators — none installed  (macon sims install <version>)")
     }
+    showSimulators(full: false)
 
     if missing.isEmpty {
         print("\nAll set. ✅")
@@ -461,12 +486,59 @@ case "service":
         fail("Usage: macon service <install|uninstall|status> [watch args…] [--label NAME]")
     }
 
+case "sims", "simulators", "sim":
+    // Inspect / install iOS simulator runtimes and devices for the test matrix.
+    let subS = args.count > 1 && !args[1].hasPrefix("--") ? args[1] : "list"
+    switch subS {
+    case "list":
+        print("iOS simulators")
+        showSimulators(full: true)
+
+    case "install", "install-os":
+        // `macon sims install [version]` — download an iOS runtime (latest if omitted).
+        let version = args.count > 2 ? args[2] : ""
+        let cmd = version.isEmpty
+            ? "xcodebuild -downloadPlatform iOS"
+            : "xcodebuild -downloadPlatform iOS -buildVersion \(version)"
+        print("⏳ Downloading iOS \(version.isEmpty ? "(latest)" : version) simulator runtime — this can take a while…")
+        let code = await Shell.run(cmd, cwd: FileManager.default.currentDirectoryPath) { print("   \($0)") }
+        if code == 0 {
+            print("✓ Done."); showSimulators(full: false)
+        } else {
+            print("✗ Download failed (exit \(code)).")
+            print("  Your Xcode may not support -buildVersion — add the runtime via")
+            print("  Xcode ▸ Settings ▸ Components, or run: \(cmd)")
+        }
+
+    case "create":
+        // `macon sims create "<device type>" <version>` — make a simulator device.
+        guard args.count > 3 else {
+            fail("Usage: macon sims create \"<device type>\" <version>   e.g. \"iPhone 16\" 18.1")
+        }
+        let device = args[2], version = args[3]
+        let runtimeID = "com.apple.CoreSimulator.SimRuntime.iOS-" + version.replacingOccurrences(of: ".", with: "-")
+        let name = "\(device) (\(version))"
+        print("⏳ Creating \(name)…")
+        let r = probe("xcrun simctl create \"\(name)\" \"\(device)\" \"\(runtimeID)\"")
+        if r.code == 0 {
+            print("✓ Created \(name)\(r.output.isEmpty ? "" : " — \(r.output)")")
+        } else {
+            print("✗ Couldn't create it: \(r.output)")
+            print("  Is iOS \(version) installed? Run: macon sims install \(version)")
+        }
+
+    default:
+        fail("Usage: macon sims <list | install [version] | create \"<device>\" <version>>")
+    }
+
 case "help", "--help", "-h":
     print("""
     macon — local CI runner (MaconKit)
     Commands:
       version                      print version
       init [--check]               check the iOS toolchain (Xcode, fastlane, sims…) & install missing
+      sims <list|install [version]|create "<device>" <version>>
+                                   list / install iOS simulator runtimes & devices
       lint [path]                  parse and summarize a macon.yml
       pipelines [file.json]        list pipelines in an app export file
       run [--workflow N] [--branch B] [--file macon.yml] [path]

@@ -16,6 +16,7 @@ macon init          # verify the toolchain first
 ```
 macon version                     print the installed version
 macon init [--check]              check the iOS toolchain; install missing tools
+macon sims <list|install|create>  list / install iOS simulator runtimes & devices
 macon lint [path]                 parse & summarize a macon.yml
 macon pipelines [file.json]       list pipelines in an app export file
 macon run [options] [path]        run one workflow once, here
@@ -38,8 +39,25 @@ macon init --check    # report only, install nothing
 ```
 
 Checks: Homebrew · Xcode + Command Line Tools · git · Ruby/Bundler · fastlane ·
-SwiftLint · gitleaks · JDK · iOS simulators · cloudflared. Xcode/simulators print
-the command to run (they can't be brew-installed).
+SwiftLint · gitleaks · JDK · iOS simulators · cloudflared. It also lists your
+installed iOS runtimes and device-type count.
+
+---
+
+## `macon sims` — simulator runtimes & devices
+
+Inspect and manage the simulators your test matrix targets.
+
+```sh
+macon sims                          # or `macon sims list` — runtimes + device types
+macon sims install 18.1             # download an iOS runtime (omit version = latest)
+macon sims create "iPhone 16" 18.1  # create a specific device on that runtime
+```
+
+Use `sims list` to find the exact `device` and `os` values for a
+[test matrix](#test-matrix). `install` runs `xcodebuild -downloadPlatform`; if
+your Xcode is too old for `-buildVersion`, add the runtime via
+Xcode ▸ Settings ▸ Components instead.
 
 ---
 
