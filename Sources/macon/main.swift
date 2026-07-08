@@ -125,6 +125,37 @@ var positional: String? {
     return result
 }
 
+/// Start the companion server for these runners if `--companion` was passed.
+/// Returns the service (keep it alive for the process lifetime) and prints a
+/// pairing code when a device still needs to pair.
+@MainActor
+func startCompanion(_ runners: [PipelineRunner], name: String) -> CompanionService? {
+    guard flag("companion") else { return nil }
+    let port = UInt16(clamping: Int(option("companion-port") ?? "8899") ?? 8899)
+    let ttlMin = Int(option("pair-ttl") ?? "15") ?? 15
+    let store = PairingStore()
+    let service = CompanionService(runners: runners, runnerName: name,
+                                   port: port, store: store) { print("[companion] \($0)") }
+    service.start()
+
+    let fixed = option("pair-code")
+    if store.deviceCount == 0 || fixed != nil {
+        let code = store.mintCode(ttl: TimeInterval(ttlMin * 60), fixed: fixed)
+        let host = ProcessInfo.processInfo.hostName
+        print("""
+
+        ┌─ Pair the MacOn companion app ──────────────────────
+        │  Address:  \(host):\(port)
+        │            (behind a tunnel, use the tunnel host)
+        │  Code:     \(code)   ·  valid \(ttlMin) min, one device
+        └──────────────────────────────────────────────────────
+        """)
+    } else {
+        print("[companion] \(store.deviceCount) device(s) already paired · listening on :\(port)")
+    }
+    return service
+}
+
 switch command {
 case "version", "--version", "-v":
     print("macon \(maconVersion)")
@@ -282,8 +313,9 @@ case "watch" where option("config") != nil:
     print("▶ Watching \(configs.count) pipeline(s) from \(path)"
           + (bundle.includesSecrets ? " (with embedded secrets)." : "; secrets from env."))
 
-    let subs = await MainActor.run { () -> [AnyCancellable] in
+    let keep = await MainActor.run { () -> ([AnyCancellable], CompanionService?) in
         var subs: [AnyCancellable] = []
+        var runners: [PipelineRunner] = []
         for cfg in configs {
             let runner = PipelineRunner(config: cfg)
             runner.makeClient = { kind in
@@ -304,11 +336,13 @@ case "watch" where option("config") != nil:
                 while printed < lines.count { print("[\(label)] \(lines[printed].text)"); printed += 1 }
             }
             subs.append(sub)
+            runners.append(runner)
             runner.startWatching()
         }
-        return subs
+        let companion = startCompanion(runners, name: option("name") ?? "MacOn Runner")
+        return (subs, companion)
     }
-    _ = subs
+    _ = keep
     while true { try? await Task.sleep(for: .seconds(3600)) }
 
 case "watch":
@@ -359,8 +393,8 @@ case "watch":
     cfg.workingDirectory = option("dir") ?? "\(home)/macon-ci/\(repo)"
     cfg.id = stableID("\(providerKind.rawValue):\(ws)/\(repo)@\(cfg.branch):\(cfg.watchMode.rawValue)")
 
-    // Retain the runner + log subscription for the life of the process.
-    let keepAlive = await MainActor.run { () -> (PipelineRunner, AnyCancellable) in
+    // Retain the runner + log subscription (+ companion server) for the process life.
+    let keepAlive = await MainActor.run { () -> (PipelineRunner, AnyCancellable, CompanionService?) in
         let runner = PipelineRunner(config: cfg)
         runner.makeClient = { _ in makeProviderClient() }
         runner.loadGlobalSecrets = { [:] }   // CLI secrets come from the inherited shell env
@@ -369,7 +403,8 @@ case "watch":
             while printed < lines.count { print(lines[printed].text); printed += 1 }
         }
         runner.startWatching()
-        return (runner, sub)
+        let companion = startCompanion([runner], name: cfg.name)
+        return (runner, sub, companion)
     }
     _ = keepAlive
     // Sleep forever; the poll loop and builds run on their own tasks.
@@ -567,6 +602,44 @@ case "sims", "simulators", "sim":
         fail("Usage: macon sims <list | install [platform] [version] | create \"<device>\" <version> [platform]>")
     }
 
+case "companion":
+    // Manage companion-app pairings. File-based, so it works with no server running.
+    let sub = args.count > 1 ? args[1].lowercased() : "help"
+    let store = PairingStore()
+    switch sub {
+    case "devices", "list":
+        let devices = store.deviceList()
+        if devices.isEmpty {
+            print("No paired devices. Start `macon watch … --companion` and pair from the app.")
+        } else {
+            let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short
+            print("Paired devices (\(devices.count)):")
+            for d in devices {
+                print("  • \(d.name)  ·  token \(d.tokenShort)…  ·  paired \(f.string(from: d.pairedAt))")
+            }
+        }
+    case "revoke":
+        guard args.count > 2 else {
+            fail("Usage: macon companion revoke <token-prefix>   (see `macon companion devices`)")
+        }
+        let n = store.revoke(prefix: args[2])
+        print(n > 0 ? "Revoked \(n) device(s)." : "No device token starts with \(args[2]).")
+    case "revoke-all":
+        store.revokeAll(); print("Revoked all paired devices.")
+    default:
+        print("""
+        macon companion — manage companion-app pairings
+          devices              list paired iPhones/iPads
+          revoke <prefix>      revoke a device by token prefix
+          revoke-all           revoke every device
+
+        The server runs alongside a watch:
+          macon watch --workspace WS --repo SLUG --companion [--companion-port 8899]
+        Pair the app with the printed code. Behind a cloudflared tunnel, point the
+        app at the tunnel host (wss), not the LAN address.
+        """)
+    }
+
 case "help", "--help", "-h":
     print("""
     macon — local CI runner (MaconKit)
@@ -597,6 +670,12 @@ case "help", "--help", "-h":
         --dir PATH                 checkout dir (default: ~/macon-ci/<repo>)
         --no-status                don't post build status back to the host
         --email E --token T        Bitbucket auth (or env BITBUCKET_EMAIL / BITBUCKET_API_TOKEN)
+        --companion                serve the iPhone/iPad companion app (monitor builds + live logs)
+        --companion-port N         companion server port (default: 8899)
+        --pair-ttl MIN             pairing-code lifetime (default: 15)
+        --pair-code CODE           use a fixed pairing code instead of a random one
+      companion <devices|revoke <prefix>|revoke-all>
+                                   manage paired companion devices
       service <install|uninstall|status> [watch args…] [--label NAME]
                                    run a watch as a launchd service (starts at login, restarts on crash)
     """)
