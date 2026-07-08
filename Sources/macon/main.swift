@@ -62,22 +62,42 @@ func probe(_ command: String) -> (code: Int32, output: String) {
     return (p.terminationStatus, s)
 }
 
-/// Print installed iOS simulator runtimes and device types. `full` lists every
-/// device type; otherwise just a count (keeps `init` output tidy).
+/// Normalize an Apple platform name to the casing Xcode/simctl expect.
+func normalizePlatform(_ s: String) -> String {
+    switch s.lowercased() {
+    case "ios":                 return "iOS"
+    case "watchos":             return "watchOS"
+    case "tvos":                return "tvOS"
+    case "visionos", "xros":    return "visionOS"
+    case "macos", "osx":        return "macOS"
+    default:                    return s
+    }
+}
+
+/// Print installed simulator runtimes (all Apple platforms) and device types.
+/// `full` lists every device type; otherwise just a count (keeps `init` tidy).
 func showSimulators(full: Bool) {
-    let rtRaw = capture("xcrun simctl list runtimes 2>/dev/null | grep -i ios", cwd: ".")
+    // Match runtime/devicetype lines by their CoreSimulator identifier, so every
+    // platform (iOS, watchOS, tvOS, visionOS) is included — not just iOS.
+    let rtRaw = capture("xcrun simctl list runtimes 2>/dev/null | grep -i simruntime", cwd: ".")
     let runtimes = rtRaw.split(separator: "\n").compactMap {
         $0.components(separatedBy: " (").first?.trimmingCharacters(in: .whitespaces)
     }.filter { !$0.isEmpty }
     if runtimes.isEmpty {
-        print("  iOS runtimes: none — add one with `macon sims install <version>`")
+        print("  Simulator runtimes: none — add one with `macon sims install <platform> [version]`")
     } else {
-        print("  iOS runtimes: \(runtimes.joined(separator: ", "))")
+        print("  Simulator runtimes: \(runtimes.joined(separator: ", "))")
     }
-    let dtRaw = capture("xcrun simctl list devicetypes 2>/dev/null | grep -iE 'iPhone|iPad'", cwd: ".")
-    let types = dtRaw.split(separator: "\n").compactMap {
-        $0.components(separatedBy: " (").first?.trimmingCharacters(in: .whitespaces)
-    }.filter { !$0.isEmpty }
+    let dtRaw = capture("xcrun simctl list devicetypes 2>/dev/null | grep -i simdevicetype", cwd: ".")
+    var seen = Set<String>()
+    let types = dtRaw.split(separator: "\n").compactMap { line -> String? in
+        // Keep the full name; drop only the trailing " (com.apple…SimDeviceType…)" id.
+        let s = String(line)
+        let name = (s.range(of: " (com.apple").map { String(s[..<$0.lowerBound]) } ?? s)
+            .trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty, seen.insert(name).inserted else { return nil }
+        return name
+    }
     if full {
         print("  Device types (\(types.count)):")
         for t in types { print("    • \(t)") }
@@ -204,12 +224,12 @@ case "init", "doctor":
         }
     }
 
-    // iOS simulator runtimes (needs Xcode).
-    let sims = probe("xcrun simctl list runtimes 2>&1 | grep -ci ios").output
+    // Simulator runtimes (any Apple platform; needs Xcode).
+    let sims = probe("xcrun simctl list runtimes 2>&1 | grep -ci simruntime").output
     if let n = Int(sims), n > 0 {
-        print("  ✓ iOS simulators  \(n) runtime(s)")
+        print("  ✓ Simulators  \(n) runtime(s)")
     } else {
-        print("  ✗ iOS simulators — none installed  (macon sims install <version>)")
+        print("  ✗ Simulators — none installed  (macon sims install <platform> [version])")
     }
     showSimulators(full: false)
 
@@ -495,12 +515,25 @@ case "sims", "simulators", "sim":
         showSimulators(full: true)
 
     case "install", "install-os":
-        // `macon sims install [version]` — download an iOS runtime (latest if omitted).
-        let version = args.count > 2 ? args[2] : ""
+        // `macon sims install [platform] [version]` — download a runtime.
+        // A bare version (starts with a digit) implies iOS, for convenience.
+        var platform = "iOS"
+        var version = ""
+        let a2 = args.count > 2 ? args[2] : ""
+        if let f = a2.first, f.isNumber {
+            version = a2
+        } else if !a2.isEmpty {
+            platform = normalizePlatform(a2)
+            version = args.count > 3 ? args[3] : ""
+        }
+        if platform == "macOS" {
+            print("macOS apps build & run natively — there's no simulator runtime to install.")
+            break
+        }
         let cmd = version.isEmpty
-            ? "xcodebuild -downloadPlatform iOS"
-            : "xcodebuild -downloadPlatform iOS -buildVersion \(version)"
-        print("⏳ Downloading iOS \(version.isEmpty ? "(latest)" : version) simulator runtime — this can take a while…")
+            ? "xcodebuild -downloadPlatform \(platform)"
+            : "xcodebuild -downloadPlatform \(platform) -buildVersion \(version)"
+        print("⏳ Downloading \(platform) \(version.isEmpty ? "(latest)" : version) simulator runtime — this can take a while…")
         let code = await Shell.run(cmd, cwd: FileManager.default.currentDirectoryPath) { print("   \($0)") }
         if code == 0 {
             print("✓ Done."); showSimulators(full: false)
@@ -511,12 +544,15 @@ case "sims", "simulators", "sim":
         }
 
     case "create":
-        // `macon sims create "<device type>" <version>` — make a simulator device.
+        // `macon sims create "<device type>" <version> [platform]` — make a device.
         guard args.count > 3 else {
-            fail("Usage: macon sims create \"<device type>\" <version>   e.g. \"iPhone 16\" 18.1")
+            fail("Usage: macon sims create \"<device type>\" <version> [platform]   e.g. \"Apple Watch Series 10 (46mm)\" 11.2 watchOS")
         }
         let device = args[2], version = args[3]
-        let runtimeID = "com.apple.CoreSimulator.SimRuntime.iOS-" + version.replacingOccurrences(of: ".", with: "-")
+        let platform = args.count > 4 ? normalizePlatform(args[4]) : "iOS"
+        // visionOS runtime identifiers use the "xrOS" prefix.
+        let prefix = platform.lowercased() == "visionos" ? "xrOS" : platform
+        let runtimeID = "com.apple.CoreSimulator.SimRuntime.\(prefix)-" + version.replacingOccurrences(of: ".", with: "-")
         let name = "\(device) (\(version))"
         print("⏳ Creating \(name)…")
         let r = probe("xcrun simctl create \"\(name)\" \"\(device)\" \"\(runtimeID)\"")
@@ -524,11 +560,11 @@ case "sims", "simulators", "sim":
             print("✓ Created \(name)\(r.output.isEmpty ? "" : " — \(r.output)")")
         } else {
             print("✗ Couldn't create it: \(r.output)")
-            print("  Is iOS \(version) installed? Run: macon sims install \(version)")
+            print("  Is \(platform) \(version) installed? Run: macon sims install \(platform) \(version)")
         }
 
     default:
-        fail("Usage: macon sims <list | install [version] | create \"<device>\" <version>>")
+        fail("Usage: macon sims <list | install [platform] [version] | create \"<device>\" <version> [platform]>")
     }
 
 case "help", "--help", "-h":
@@ -537,8 +573,8 @@ case "help", "--help", "-h":
     Commands:
       version                      print version
       init [--check]               check the iOS toolchain (Xcode, fastlane, sims…) & install missing
-      sims <list|install [version]|create "<device>" <version>>
-                                   list / install iOS simulator runtimes & devices
+      sims <list|install [platform] [version]|create "<device>" <version> [platform]>
+                                   list / install simulator runtimes (iOS, watchOS, tvOS, visionOS)
       lint [path]                  parse and summarize a macon.yml
       pipelines [file.json]        list pipelines in an app export file
       run [--workflow N] [--branch B] [--file macon.yml] [path]

@@ -16,7 +16,7 @@ macon init          # verify the toolchain first
 ```
 macon version                     print the installed version
 macon init [--check]              check the iOS toolchain; install missing tools
-macon sims <list|install|create>  list / install iOS simulator runtimes & devices
+macon sims <list|install|create>  list / install simulator runtimes (all Apple platforms)
 macon lint [path]                 parse & summarize a macon.yml
 macon pipelines [file.json]       list pipelines in an app export file
 macon run [options] [path]        run one workflow once, here
@@ -46,15 +46,21 @@ installed iOS runtimes and device-type count.
 
 ## `macon sims` — simulator runtimes & devices
 
-Inspect and manage the simulators your test matrix targets.
+Inspect and manage the simulators your test matrix targets — for **iOS,
+watchOS, tvOS, and visionOS** (macOS builds run natively, no simulator).
 
 ```sh
-macon sims                          # or `macon sims list` — runtimes + device types
-macon sims install 18.1             # download an iOS runtime (omit version = latest)
-macon sims create "iPhone 16" 18.1  # create a specific device on that runtime
+macon sims                                    # list runtimes + device types (all platforms)
+macon sims install 18.1                       # iOS runtime (bare version ⇒ iOS)
+macon sims install watchOS 11.2               # a watchOS runtime
+macon sims install tvOS                        # latest tvOS runtime
+macon sims create "iPhone 16" 18.1            # create an iOS device
+macon sims create "Apple Watch Series 10 (46mm)" 11.2 watchOS
 ```
 
-Use `sims list` to find the exact `device` and `os` values for a
+Note: macon *builds* any Apple platform already (it just runs your fastlane/
+scripts) — these commands only manage the **simulators** for platforms that have
+them. Use `sims list` to find exact `device`/`os` values for a
 [test matrix](#test-matrix). `install` runs `xcodebuild -downloadPlatform`; if
 your Xcode is too old for `-buildVersion`, add the runtime via
 Xcode ▸ Settings ▸ Components instead.
