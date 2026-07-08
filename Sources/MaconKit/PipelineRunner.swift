@@ -117,12 +117,15 @@ public final class PipelineRunner: ObservableObject, Identifiable {
         let port = UInt16(clamping: config.webhookPort)
         let server = WebhookServer(
             port: port,
+            secret: config.webhookSecret,
             onLog: { [weak self] line in Task { @MainActor in self?.appendLine(line) } },
             onEvent: { [weak self] event in Task { @MainActor in self?.handleWebhook(event) } })
         server.start()
         webhookServer = server
-        appendLine("🪝 Webhook listening on :\(port) — \(target). "
-                   + "Point Bitbucket at http://<this-mac>:\(port)/ (repo settings → Webhooks).")
+        let sec = config.webhookSecret.trimmingCharacters(in: .whitespaces).isEmpty
+            ? "no secret set — accepts any POST" : "secret required"
+        appendLine("🪝 Webhook listening on :\(port) — \(target) (\(sec)). "
+                   + "Point the host at http://<this-mac>:\(port)/ (repo settings → Webhooks).")
     }
 
     /// Decide whether an incoming webhook event should build, then build it.
@@ -277,6 +280,20 @@ public final class PipelineRunner: ObservableObject, Identifiable {
             appendLine("──────── PR #\(pr.id): \(pr.title) @ \(sha.prefix(8)) ────────")
         } else {
             appendLine("──────── build \(sha.prefix(8)) ────────")
+        }
+
+        // Watchdog: cancel a build that outruns the timeout. Captures this build's
+        // control so a later build is never affected.
+        if config.buildTimeoutSeconds > 0 {
+            let ctrl = control
+            let limit = config.buildTimeoutSeconds
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(limit))
+                if self.control === ctrl && self.isBuilding && !ctrl.cancelled {
+                    self.appendLine("⏱ Build exceeded \(limit)s — cancelling.")
+                    ctrl.cancel()
+                }
+            }
         }
 
         let client = client()

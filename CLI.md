@@ -21,6 +21,7 @@ macon pipelines [file.json]       list pipelines in an app export file
 macon run [options] [path]        run one workflow once, here
 macon watch [options]             watch a repo and build new commits (until Ctrl-C)
 macon watch --config file.json    watch pipelines exported from the app
+macon service <install|…>         run a watch as a launchd service
 macon help                        show usage
 ```
 
@@ -100,6 +101,8 @@ macon watch --workspace WS --repo SLUG [options]
 | `--pr-target B` | all | with `--prs`, only PRs targeting this branch |
 | `--webhook` | off | push mode: listen for webhooks instead of polling |
 | `--port N` | `8787` | webhook listen port |
+| `--webhook-secret S` | none | require a secret (GitHub HMAC, or present in the URL path). Or env `MACON_WEBHOOK_SECRET` |
+| `--timeout MINS` | none | cancel a build that runs longer than `MINS` minutes |
 | `--every SECS` | `30` | poll interval (polling mode) |
 | `--workflow N` | auto | workflow to run from the pipeline file |
 | `--file macon.yml` | `macon.yml` | pipeline file to look for |
@@ -116,6 +119,27 @@ macon watch --config macon-export.json --pipeline "Name"  # just one
 
 Each pipeline uses its own saved settings. Log lines are prefixed with the
 pipeline name.
+
+---
+
+## `macon service` — run as a background service
+
+Install a `watch` as a `launchd` LaunchAgent so it starts at login and restarts
+on crash — the way to run macon unattended on an always-on Mac (or an EC2 Mac).
+
+```sh
+# install: everything after `install` is the watch command it will run
+macon service install --config ~/macon-export.json
+macon service install --provider github --workspace org --repo app --webhook --label ci
+
+macon service status   [--label NAME]     # loaded? where are the logs?
+macon service uninstall [--label NAME]    # stop and remove
+```
+
+`--label NAME` lets you run several (default label is `default`). Logs go to
+`~/Library/Logs/macon/<label>.log`. Credentials/secrets present in your shell at
+install time (`BITBUCKET_*`, `GITHUB_TOKEN`, `ASC_*`, `SLACK_URL`,
+`MACON_WEBHOOK_SECRET`) are copied into the LaunchAgent so the service can build.
 
 ---
 

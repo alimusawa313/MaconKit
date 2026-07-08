@@ -10,6 +10,7 @@
 
 import Foundation
 import Network
+import CryptoKit
 
 /// A parsed Bitbucket webhook event (push or pull request).
 public struct WebhookEvent: Sendable {
@@ -29,6 +30,7 @@ public struct WebhookEvent: Sendable {
 public final class WebhookServer: @unchecked Sendable {
 
     private let port: NWEndpoint.Port
+    private let secret: String
     private let queue = DispatchQueue(label: "macon.webhook")
     private var listener: NWListener?
 
@@ -36,9 +38,11 @@ public final class WebhookServer: @unchecked Sendable {
     private let onLog: @Sendable (String) -> Void
 
     public init(port: UInt16,
+                secret: String = "",
                 onLog: @escaping @Sendable (String) -> Void,
                 onEvent: @escaping @Sendable (WebhookEvent) -> Void) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8787
+        self.secret = secret.trimmingCharacters(in: .whitespacesAndNewlines)
         self.onLog = onLog
         self.onEvent = onEvent
     }
@@ -105,23 +109,32 @@ public final class WebhookServer: @unchecked Sendable {
                 return
             }
 
-            let method = header.split(separator: "\r\n").first?.split(separator: " ").first.map(String.init) ?? ""
+            let requestLine = header.split(separator: "\r\n").first.map(String.init) ?? ""
+            let parts = requestLine.split(separator: " ")
+            let method = parts.first.map(String.init) ?? ""
+            let path = parts.count > 1 ? String(parts[1]) : "/"
+
             if method.uppercased() == "POST" {
                 let body = acc.subdata(in: bodyStart..<acc.endIndex)
+                let ghSig = self.headerValue(header, "x-hub-signature-256")
+                if !self.authorized(body: body, path: path, githubSignature: ghSig) {
+                    self.onLog("⛔︎ Rejected webhook — secret/signature mismatch.")
+                    self.respond(conn, status: "401 Unauthorized", body: "unauthorized\n")
+                    return
+                }
                 let bbEvent = self.headerValue(header, "x-event-key")       // Bitbucket
                 let ghEvent = self.headerValue(header, "x-github-event")    // GitHub
                 if let event = Self.parse(body: body, bitbucketEvent: bbEvent, githubEvent: ghEvent) {
                     self.onEvent(event)
                 }
             }
-            self.respond(conn, method: method)
+            self.respond(conn, status: "200 OK", body: method.uppercased() == "GET" ? "macon webhook ok\n" : "received\n")
         }
     }
 
-    private func respond(_ conn: NWConnection, method: String) {
-        let body = method.uppercased() == "GET" ? "macon webhook ok\n" : "received\n"
+    private func respond(_ conn: NWConnection, status: String, body: String) {
         let response = """
-        HTTP/1.1 200 OK\r
+        HTTP/1.1 \(status)\r
         Content-Type: text/plain\r
         Content-Length: \(body.utf8.count)\r
         Connection: close\r
@@ -129,6 +142,30 @@ public final class WebhookServer: @unchecked Sendable {
         \(body)
         """
         conn.send(content: Data(response.utf8), completion: .contentProcessed { _ in conn.cancel() })
+    }
+
+    /// Decide whether a request may trigger a build.
+    /// - No secret configured → allow (safe behind a private tunnel/LAN).
+    /// - GitHub sends X-Hub-Signature-256 → verify the HMAC-SHA256 of the body.
+    /// - Otherwise (Bitbucket/generic) → require the secret to appear in the URL path.
+    private func authorized(body: Data, path: String, githubSignature: String?) -> Bool {
+        guard !secret.isEmpty else { return true }
+        if let sig = githubSignature {
+            let key = SymmetricKey(data: Data(secret.utf8))
+            let mac = HMAC<SHA256>.authenticationCode(for: body, using: key)
+            let expected = "sha256=" + mac.map { String(format: "%02x", $0) }.joined()
+            return constantTimeEqual(sig, expected)
+        }
+        return path.contains(secret)
+    }
+
+    /// Length-aware, non-short-circuiting compare (avoids leaking match length via timing).
+    private func constantTimeEqual(_ a: String, _ b: String) -> Bool {
+        let x = Array(a.utf8), y = Array(b.utf8)
+        guard x.count == y.count else { return false }
+        var diff: UInt8 = 0
+        for i in 0..<x.count { diff |= x[i] ^ y[i] }
+        return diff == 0
     }
 
     // MARK: - Header helpers

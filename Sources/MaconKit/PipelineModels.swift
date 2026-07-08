@@ -50,6 +50,12 @@ public struct PipelineConfig: Identifiable, Codable, Equatable {
     /// Port the webhook listener binds to (webhook mode only). Each webhook
     /// pipeline needs its own port.
     public var webhookPort = 8787
+    /// Shared secret for webhook auth. GitHub: HMAC over the payload
+    /// (X-Hub-Signature-256). Bitbucket/other: must appear in the request URL
+    /// path. Blank = accept any POST (fine behind a private tunnel).
+    public var webhookSecret = ""
+    /// Kill a build that runs longer than this many seconds (0 = no limit).
+    public var buildTimeoutSeconds = 0
     /// Post build status back to the commit on Bitbucket.
     public var postStatus = true
     /// Names of secret env vars (e.g. ASC_KEY_ID). Values live in the Keychain,
@@ -78,6 +84,8 @@ public struct PipelineConfig: Identifiable, Codable, Equatable {
         triggerMode = (try? c.decode(TriggerMode.self, forKey: .triggerMode)) ?? .polling
         pollSeconds = (try? c.decode(Int.self, forKey: .pollSeconds)) ?? 30
         webhookPort = (try? c.decode(Int.self, forKey: .webhookPort)) ?? 8787
+        webhookSecret = (try? c.decode(String.self, forKey: .webhookSecret)) ?? ""
+        buildTimeoutSeconds = (try? c.decode(Int.self, forKey: .buildTimeoutSeconds)) ?? 0
         postStatus = (try? c.decode(Bool.self, forKey: .postStatus)) ?? true
         secretKeys = (try? c.decode([String].self, forKey: .secretKeys)) ?? []
     }

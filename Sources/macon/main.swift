@@ -301,6 +301,8 @@ case "watch":
     if let e = option("every"), let s = Int(e) { cfg.pollSeconds = s }
     cfg.triggerMode = flag("webhook") ? .webhook : .polling
     if let p = option("port"), let n = Int(p) { cfg.webhookPort = n }
+    cfg.webhookSecret = option("webhook-secret") ?? env["MACON_WEBHOOK_SECRET"] ?? ""
+    if let t = option("timeout"), let m = Int(t) { cfg.buildTimeoutSeconds = m * 60 }
     cfg.postStatus = !flag("no-status")
     let home = FileManager.default.homeDirectoryForCurrentUser.path
     cfg.workingDirectory = option("dir") ?? "\(home)/macon-ci/\(repo)"
@@ -337,6 +339,122 @@ case "pipelines":
               + "(\(cfg.triggerMode.rawValue))")
     }
 
+case "service":
+    // Manage a launchd LaunchAgent so a `watch` runs at login and restarts on crash.
+    //   macon service install [watch args…] [--label NAME]
+    //   macon service uninstall [--label NAME]
+    //   macon service status [--label NAME]
+    let sub = args.count > 1 && !args[1].hasPrefix("--") ? args[1] : ""
+    let label = (option("label") ?? "default")
+        .components(separatedBy: CharacterSet.alphanumerics.inverted.subtracting(CharacterSet(charactersIn: "-_")))
+        .joined()
+    let serviceName = "com.macon.\(label.isEmpty ? "default" : label)"
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    let plistPath = "\(home)/Library/LaunchAgents/\(serviceName).plist"
+    let logDir = "\(home)/Library/Logs/macon"
+    let logPath = "\(logDir)/\(label.isEmpty ? "default" : label).log"
+
+    switch sub {
+    case "install":
+        // Resolve the macon binary via PATH (stable across brew upgrades).
+        let onPath = capture("command -v macon", cwd: ".")
+        let exe = !onPath.isEmpty ? onPath : (Bundle.main.executablePath ?? CommandLine.arguments[0])
+
+        // Everything after `service install`, minus --label, becomes the watch args.
+        var watchArgs = Array(args.dropFirst(2))
+        if let li = watchArgs.firstIndex(of: "--label") {
+            watchArgs.removeSubrange(li...(li + 1 < watchArgs.count ? li + 1 : li))
+        }
+        // launchd runs from $HOME, so make --config / --dir absolute.
+        for optName in ["--config", "--dir"] {
+            if let oi = watchArgs.firstIndex(of: optName), oi + 1 < watchArgs.count,
+               !watchArgs[oi + 1].hasPrefix("/") {
+                watchArgs[oi + 1] = FileManager.default.currentDirectoryPath + "/" + watchArgs[oi + 1]
+            }
+        }
+        let program = [exe, "watch"] + watchArgs
+
+        // Bake in whatever creds/secrets are set in the current shell.
+        let env = ProcessInfo.processInfo.environment
+        let passthrough = ["BITBUCKET_EMAIL", "BITBUCKET_API_TOKEN", "GITHUB_TOKEN",
+                           "MACON_WEBHOOK_SECRET", "ASC_KEY_ID", "ASC_ISSUER_ID",
+                           "ASC_KEY_CONTENT", "SLACK_URL"]
+        var envDict: [String: String] = ["PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"]
+        for k in passthrough { if let v = env[k], !v.isEmpty { envDict[k] = v } }
+
+        let esc: (String) -> String = {
+            $0.replacingOccurrences(of: "&", with: "&amp;")
+              .replacingOccurrences(of: "<", with: "&lt;")
+              .replacingOccurrences(of: ">", with: "&gt;")
+        }
+        let progXML = program.map { "      <string>\(esc($0))</string>" }.joined(separator: "\n")
+        let envXML = envDict.sorted { $0.key < $1.key }
+            .map { "      <key>\($0.key)</key><string>\(esc($0.value))</string>" }.joined(separator: "\n")
+
+        let plist = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+          <key>Label</key><string>\(serviceName)</string>
+          <key>ProgramArguments</key>
+          <array>
+        \(progXML)
+          </array>
+          <key>RunAtLoad</key><true/>
+          <key>KeepAlive</key><true/>
+          <key>WorkingDirectory</key><string>\(home)</string>
+          <key>StandardOutPath</key><string>\(logPath)</string>
+          <key>StandardErrorPath</key><string>\(logPath)</string>
+          <key>EnvironmentVariables</key>
+          <dict>
+        \(envXML)
+          </dict>
+        </dict>
+        </plist>
+        """
+
+        try? FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(atPath: "\(home)/Library/LaunchAgents", withIntermediateDirectories: true)
+        do {
+            try plist.write(toFile: plistPath, atomically: true, encoding: .utf8)
+        } catch {
+            fail("Couldn't write \(plistPath): \(error.localizedDescription)")
+        }
+        _ = capture("launchctl unload \(plistPath) 2>/dev/null", cwd: ".")
+        let load = probe("launchctl load -w \(plistPath)")
+        print("✓ Installed service \(serviceName)")
+        print("  runs: \(program.joined(separator: " "))")
+        print("  logs: \(logPath)")
+        if load.code != 0 { print("  ⚠︎ launchctl load: \(load.output)") }
+        print("\nIt now starts at login and restarts on crash. Manage it with:")
+        print("  macon service status  --label \(label.isEmpty ? "default" : label)")
+        print("  macon service uninstall --label \(label.isEmpty ? "default" : label)")
+
+    case "uninstall":
+        _ = capture("launchctl unload \(plistPath) 2>/dev/null", cwd: ".")
+        if FileManager.default.fileExists(atPath: plistPath) {
+            try? FileManager.default.removeItem(atPath: plistPath)
+            print("✓ Removed service \(serviceName).")
+        } else {
+            print("No service \(serviceName) installed.")
+        }
+
+    case "status":
+        let r = probe("launchctl list | grep \(serviceName)")
+        if r.code == 0 && !r.output.isEmpty {
+            print("● \(serviceName) is loaded:")
+            print("  \(r.output)")
+        } else {
+            print("○ \(serviceName) is not loaded.")
+        }
+        if FileManager.default.fileExists(atPath: plistPath) { print("  plist: \(plistPath)") }
+        print("  logs:  \(logPath)")
+
+    default:
+        fail("Usage: macon service <install|uninstall|status> [watch args…] [--label NAME]")
+    }
+
 case "help", "--help", "-h":
     print("""
     macon — local CI runner (MaconKit)
@@ -355,14 +473,18 @@ case "help", "--help", "-h":
                                    GitHub: --token/GITHUB_TOKEN; workspace = owner/org
         --branch B                 branch to watch (default: main)
         --prs [--pr-target B]      watch open PRs instead of a branch
-        --webhook [--port N]       push mode: listen for Bitbucket webhooks (default port 8787)
-                                   (default is polling — ask Bitbucket every --every seconds)
+        --webhook [--port N]       push mode: listen for webhooks (default port 8787)
+                                   (default is polling — ask the host every --every seconds)
+        --webhook-secret S         require this secret (GitHub HMAC, or in the URL path)
+        --timeout MINS             cancel a build that runs longer than MINS (0 = no limit)
         --every SECS               poll interval for polling mode (default: 30)
         --workflow N               macon.yml workflow to run (default: auto by trigger)
         --file macon.yml           pipeline file to look for (default: macon.yml)
         --dir PATH                 checkout dir (default: ~/macon-ci/<repo>)
-        --no-status                don't post build status back to Bitbucket
+        --no-status                don't post build status back to the host
         --email E --token T        Bitbucket auth (or env BITBUCKET_EMAIL / BITBUCKET_API_TOKEN)
+      service <install|uninstall|status> [watch args…] [--label NAME]
+                                   run a watch as a launchd service (starts at login, restarts on crash)
     """)
 
 default:
