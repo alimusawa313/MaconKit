@@ -7,6 +7,7 @@ the CLI both build on `MaconKit`, so a pipeline runs identically in either.
 
 ```
 macon version
+macon init [--check]              # check the iOS toolchain, install what's missing
 macon lint [path]                 # parse & summarize a macon.yml
 macon run [--workflow N] [--branch B] [--file macon.yml] [path]
 macon watch --workspace WS --repo SLUG [--branch B | --prs] [options]
@@ -80,6 +81,20 @@ values via the shell env when you run (`BITBUCKET_API_TOKEN`, `GITHUB_TOKEN`, pl
 your own like `SLACK_URL`). Export **with** secrets for a self-contained file
 (contains tokens in plain text — keep it private). The app's **Import…** button
 loads a file back, so it doubles as a way to move a setup between machines.
+
+## First run: `macon init`
+
+Before watching anything, check the machine has what an iOS build needs:
+
+```sh
+macon init            # check + auto-install missing Homebrew tools
+macon init --check    # report only, install nothing
+```
+
+It verifies Homebrew, Xcode + Command Line Tools, git, Ruby/Bundler, fastlane,
+SwiftLint, gitleaks, a JDK (for the Bitbucket runner), iOS simulator runtimes,
+and cloudflared (optional, for webhook tunnels). Tools available via Homebrew are
+installed automatically; Xcode and simulators print the exact command to run.
 
 ## Install now (no Homebrew)
 

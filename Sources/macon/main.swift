@@ -49,6 +49,19 @@ func capture(_ command: String, cwd: String) -> String {
     return String(data: d, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 }
 
+/// Run a command; return its exit code and merged stdout+stderr. Used by `init`
+/// to detect a tool reliably — presence is the exit code, not "did it print".
+func probe(_ command: String) -> (code: Int32, output: String) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+    p.arguments = ["-lc", command]
+    let out = Pipe(); p.standardOutput = out; p.standardError = out
+    do { try p.run(); p.waitUntilExit() } catch { return (-1, "") }
+    let d = out.fileHandleForReading.readDataToEndOfFile()
+    let s = String(data: d, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return (p.terminationStatus, s)
+}
+
 /// Parse `--flag value` options and a trailing positional argument.
 func option(_ name: String) -> String? {
     guard let i = args.firstIndex(of: "--\(name)"), i + 1 < args.count else { return nil }
@@ -106,6 +119,96 @@ case "run":
         print(line)
     }
     exit(code)
+
+case "init", "doctor":
+    // Check the toolchain an iOS build needs; install what can be installed via
+    // Homebrew. `--check` reports only (no installs).
+    let checkOnly = flag("check")
+    print("macon init — checking iOS CI prerequisites\n")
+
+    let hasBrew = probe("command -v brew").code == 0
+
+    struct Dep {
+        let name: String
+        let probe: String        // exits 0 when present; first output line is the version
+        let install: String?     // auto-install command (nil = manual only)
+        let hint: String         // shown when missing
+        var gui = false          // install opens a GUI / can't be confirmed inline
+    }
+
+    let deps: [Dep] = [
+        Dep(name: "Homebrew", probe: "brew --version", install: nil,
+            hint: "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""),
+        Dep(name: "Xcode Command Line Tools", probe: "xcode-select -p",
+            install: "xcode-select --install",
+            hint: "xcode-select --install (a system dialog will open)", gui: true),
+        Dep(name: "Xcode", probe: "xcodebuild -version", install: nil,
+            hint: "Install Xcode from the App Store, then: sudo xcodebuild -license accept"),
+        Dep(name: "git", probe: "git --version", install: nil,
+            hint: "Ships with the Xcode Command Line Tools."),
+        Dep(name: "Ruby", probe: "ruby -v", install: nil,
+            hint: "System Ruby usually works; or `brew install ruby`."),
+        Dep(name: "Bundler", probe: "bundle -v", install: nil,
+            hint: "gem install bundler  (may need sudo on system Ruby)"),
+        Dep(name: "fastlane", probe: "fastlane --version 2>&1 | grep -iE '^fastlane [0-9]'",
+            install: hasBrew ? "brew install fastlane" : nil, hint: "brew install fastlane"),
+        Dep(name: "SwiftLint", probe: "swiftlint version",
+            install: hasBrew ? "brew install swiftlint" : nil, hint: "brew install swiftlint"),
+        Dep(name: "gitleaks", probe: "gitleaks version",
+            install: hasBrew ? "brew install gitleaks" : nil, hint: "brew install gitleaks"),
+        Dep(name: "JDK (Bitbucket runner)", probe: "/usr/libexec/java_home",
+            install: hasBrew ? "brew install openjdk@25" : nil, hint: "brew install openjdk@25"),
+        Dep(name: "cloudflared (webhook tunnel, optional)", probe: "command -v cloudflared",
+            install: hasBrew ? "brew install cloudflared" : nil, hint: "brew install cloudflared"),
+    ]
+
+    var missing: [Dep] = []
+    for d in deps {
+        let r = probe(d.probe)
+        if r.code == 0 && !r.output.isEmpty {
+            let v = r.output.split(separator: "\n").first.map(String.init) ?? ""
+            print("  ✓ \(d.name)  \(v)")
+        } else {
+            print("  ✗ \(d.name) — not found")
+            missing.append(d)
+        }
+    }
+
+    // iOS simulator runtimes (needs Xcode).
+    let sims = probe("xcrun simctl list runtimes 2>&1 | grep -ci ios").output
+    if let n = Int(sims), n > 0 {
+        print("  ✓ iOS simulators  \(n) runtime(s)")
+    } else {
+        print("  ✗ iOS simulators — none installed  (xcodebuild -downloadPlatform iOS)")
+    }
+
+    if missing.isEmpty {
+        print("\nAll set. ✅")
+    } else if checkOnly {
+        print("\nMissing — install with:")
+        for d in missing { print("  • \(d.name): \(d.hint)") }
+        print("\nRe-run `macon init` (without --check) to auto-install the Homebrew ones.")
+    } else {
+        print("\nInstalling what I can…")
+        for d in missing {
+            guard let cmd = d.install else {
+                print("  • \(d.name) needs manual setup: \(d.hint)")
+                continue
+            }
+            print("\n⏳ \(d.name) — \(cmd)")
+            let code = await Shell.run(cmd, cwd: FileManager.default.currentDirectoryPath) { line in
+                print("   \(line)")
+            }
+            if d.gui {
+                print("  → complete \(d.name) in the dialog that opened, then re-run `macon init --check`.")
+            } else if code == 0 {
+                print("  ✓ \(d.name) installed.")
+            } else {
+                print("  ✗ \(d.name) failed (exit \(code)) — do it manually: \(d.hint)")
+            }
+        }
+        print("\nDone. Verify with `macon init --check`.")
+    }
 
 case "watch" where option("config") != nil:
     // Watch every pipeline from an app export file (macon-export.json). Creds and
@@ -239,6 +342,7 @@ case "help", "--help", "-h":
     macon — local CI runner (MaconKit)
     Commands:
       version                      print version
+      init [--check]               check the iOS toolchain (Xcode, fastlane, sims…) & install missing
       lint [path]                  parse and summarize a macon.yml
       pipelines [file.json]        list pipelines in an app export file
       run [--workflow N] [--branch B] [--file macon.yml] [path]
