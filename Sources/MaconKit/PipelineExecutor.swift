@@ -84,14 +84,57 @@ public enum PipelineExecutor {
                 if c != 0 { onLine("↷ Skipped (run_if not met)."); continue }
             }
 
-            let code = await Shell.run(r.step.script, cwd: options.workingDirectory, extraEnv: env,
-                                       onProcess: options.onProcess, onLine: onLine)
-            if code != 0 {
-                onLine("✗ Step “\(r.step.name)” failed (exit \(code)).")
-                if !failed { failed = true; firstFailCode = code }
+            // Fan out over the matrix (or a single no-matrix run). All combinations
+            // run so you see every failure; the step fails if any combination does.
+            let combos = matrixCombinations(r.step.matrix)
+            if combos.count > 1 {
+                onLine("▦ Matrix: \(combos.count) combinations")
             }
+            var stepFailed = false
+            var stepCode: Int32 = 0
+            for combo in combos {
+                if options.shouldCancel() { break }
+                var cenv = env
+                var label = ""
+                if !combo.isEmpty {
+                    label = combo.sorted { $0.key < $1.key }
+                        .map { "\($0.key)=\($0.value)" }.joined(separator: ", ")
+                    onLine("· [\(label)]")
+                    for (k, v) in combo { cenv["MACON_MATRIX_\(envKey(k))"] = v }
+                }
+                let code = await Shell.run(r.step.script, cwd: options.workingDirectory, extraEnv: cenv,
+                                           onProcess: options.onProcess, onLine: onLine)
+                if code != 0 {
+                    onLine(combo.isEmpty
+                           ? "✗ Step “\(r.step.name)” failed (exit \(code))."
+                           : "✗ Step “\(r.step.name)” [\(label)] failed (exit \(code)).")
+                    stepFailed = true
+                    if stepCode == 0 { stepCode = code }
+                }
+            }
+            if stepFailed && !failed { failed = true; firstFailCode = stepCode }
         }
         return failed ? firstFailCode : 0
+    }
+
+    /// Cartesian product of a matrix (sorted keys for deterministic order).
+    /// nil / empty → a single run with no matrix env (`[[:]]`).
+    static func matrixCombinations(_ matrix: [String: [String]]?) -> [[String: String]] {
+        guard let matrix, !matrix.isEmpty else { return [[:]] }
+        var result: [[String: String]] = [[:]]
+        for key in matrix.keys.sorted() {
+            let values = matrix[key] ?? []
+            guard !values.isEmpty else { continue }
+            result = result.flatMap { combo in
+                values.map { v -> [String: String] in var c = combo; c[key] = v; return c }
+            }
+        }
+        return result
+    }
+
+    /// Sanitize a matrix key into a valid env-var suffix (A–Z, 0–9, _).
+    static func envKey(_ key: String) -> String {
+        String(key.uppercased().map { $0.isLetter || $0.isNumber ? $0 : "_" })
     }
 
     /// Pick the workflow: explicit override, else match branch/PR to triggers, else default/single.

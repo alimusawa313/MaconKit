@@ -146,6 +146,10 @@ public struct MaconStep: Codable {
     public var run_if: String?
     /// Run even if an earlier step already failed (like Bitrise is_always_run).
     public var always_run: Bool?
+    /// Fan the step out over every combination of these values (e.g. device × os).
+    /// Each run gets `MACON_MATRIX_<KEY>` in its env. All combinations run; the
+    /// step fails if any of them fails.
+    public var matrix: [String: [String]]?
 }
 
 public struct MaconTrigger: Codable {

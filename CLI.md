@@ -53,6 +53,27 @@ macon lint path/to/macon.yml
 Prints the workflows, their steps, `before_run` chains, and triggers. Good for
 catching YAML mistakes before a build.
 
+### Test matrix
+
+A step can fan out over combinations (e.g. device × OS) — useful for UI tests
+across simulators. Each run gets `MACON_MATRIX_<KEY>` in its environment. All
+combinations run; the step fails if any of them fails.
+
+```yaml
+workflows:
+  test:
+    steps:
+      - name: UI Tests
+        matrix:
+          device: ["iPhone 16", "iPad Air"]
+          os: ["17.5", "18.2"]          # → 4 runs
+        script: bundle exec fastlane test device:"$MACON_MATRIX_DEVICE" os:"$MACON_MATRIX_OS"
+```
+
+(Combinations run sequentially, so simulators don't contend. If you'd rather one
+`xcodebuild` invocation parallelize them, pass multiple `-destination` flags in
+your fastlane lane instead.)
+
 ---
 
 ## `macon run` — run once
