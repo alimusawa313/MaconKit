@@ -247,8 +247,10 @@ macon companion revoke-all          # revoke every device
 > **Screen streaming:** from the **app** (Settings → Companion app → *Let paired
 > devices view this screen*), a paired device can also watch the Mac's screen live
 > — the app captures with ScreenCaptureKit and hardware-encodes H.264 (VideoToolbox)
-> at up to 60–120 fps. This is an app feature; `macon watch --companion` from the
-> CLI serves builds + logs only (a headless runner has no display to capture).
+> at up to 60–120 fps. A paired device can also **control** the Mac (cursor +
+> keyboard) when *Let paired devices control this Mac* is on and Accessibility is
+> granted. Both are app features; `macon watch --companion` from the CLI serves
+> builds + logs only (a headless runner has no display to capture or drive).
 
 ---
 

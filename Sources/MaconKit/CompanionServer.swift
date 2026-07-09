@@ -40,6 +40,10 @@ public final class CompanionServer: @unchecked Sendable {
     /// Optional H.264 screen streaming. Nil disables the /screen route (e.g. the
     /// headless CLI, which has no display to capture).
     private let screen: ScreenBroadcaster?
+    /// Optional remote-control sink. Nil disables the /control route.
+    private let control: (@Sendable (ControlEvent) -> Void)?
+
+    private static let controlDecoder = JSONDecoder()
 
     public init(port: UInt16,
                 authorize: @escaping Authorize,
@@ -48,6 +52,7 @@ public final class CompanionServer: @unchecked Sendable {
                 build: @escaping Build,
                 logsSince: @escaping LogsSince,
                 screen: ScreenBroadcaster? = nil,
+                control: (@Sendable (ControlEvent) -> Void)? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8899
         self.authorize = authorize
@@ -56,6 +61,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.build = build
         self.logsSince = logsSince
         self.screen = screen
+        self.control = control
         self.onLog = onLog
     }
 
@@ -146,6 +152,13 @@ public final class CompanionServer: @unchecked Sendable {
            headerValue(header, "upgrade")?.lowercased() == "websocket" {
             guard screen != nil else { respond(conn, "404 Not Found", json: nil); return }
             upgradeAndStreamScreen(conn, header: header); return
+        }
+
+        // WS /control — remote input events, iPad → Mac
+        if method == "GET", path == "/control",
+           headerValue(header, "upgrade")?.lowercased() == "websocket" {
+            guard control != nil else { respond(conn, "404 Not Found", json: nil); return }
+            upgradeAndControl(conn, header: header); return
         }
 
         // GET /builds
@@ -270,6 +283,71 @@ public final class CompanionServer: @unchecked Sendable {
                 }
             }
         })
+    }
+
+    // MARK: Remote control (inbound)
+
+    /// Upgrade to WebSocket, then read masked client frames and decode input events.
+    private func upgradeAndControl(_ conn: NWConnection, header: String) {
+        guard let key = headerValue(header, "sec-websocket-key") else { respond(conn, "400 Bad Request", json: nil); return }
+        let magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+        let accept = Data(Insecure.SHA1.hash(data: Data((key + magic).utf8))).base64EncodedString()
+        let handshake = "HTTP/1.1 101 Switching Protocols\r\n"
+            + "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: \(accept)\r\n\r\n"
+        conn.send(content: Data(handshake.utf8), completion: .contentProcessed { [weak self] _ in
+            self?.readControl(conn, buffer: Data())
+        })
+    }
+
+    private func readControl(_ conn: NWConnection, buffer: Data) {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
+            guard let self else { conn.cancel(); return }
+            var acc = buffer
+            if let data, !data.isEmpty { acc.append(data) }
+            let leftover = self.parseControlFrames(acc, conn: conn)
+            if isComplete || error != nil { conn.cancel(); return }
+            self.readControl(conn, buffer: leftover)
+        }
+    }
+
+    /// Parse complete client frames (masked), dispatch text/binary payloads as
+    /// ControlEvents, and return any trailing partial-frame bytes.
+    private func parseControlFrames(_ buffer: Data, conn: NWConnection) -> Data {
+        let buf = [UInt8](buffer)
+        var off = 0
+        while buf.count - off >= 2 {
+            let opcode = buf[off] & 0x0F
+            let masked = (buf[off + 1] & 0x80) != 0
+            var len = Int(buf[off + 1] & 0x7F)
+            var hdr = 2
+            if len == 126 {
+                guard buf.count - off >= 4 else { break }
+                len = Int(buf[off + 2]) << 8 | Int(buf[off + 3]); hdr = 4
+            } else if len == 127 {
+                guard buf.count - off >= 10 else { break }
+                len = 0; for k in 0..<8 { len = (len << 8) | Int(buf[off + 2 + k]) }; hdr = 10
+            }
+            let maskLen = masked ? 4 : 0
+            let total = hdr + maskLen + len
+            guard buf.count - off >= total else { break }
+
+            var payload = Array(buf[(off + hdr + maskLen)..<(off + total)])
+            if masked {
+                let key = Array(buf[(off + hdr)..<(off + hdr + 4)])
+                for i in 0..<payload.count { payload[i] ^= key[i % 4] }
+            }
+            off += total
+
+            switch opcode {
+            case 0x8: conn.cancel(); return Data()                       // close
+            case 0x1, 0x2:                                                // text / binary
+                if let event = try? Self.controlDecoder.decode(ControlEvent.self, from: Data(payload)) {
+                    control?(event)
+                }
+            default: break                                               // ping/pong — ignore
+            }
+        }
+        return off < buf.count ? Data(buf[off...]) : Data()
     }
 
     /// Encode one unmasked server→client frame (RFC 6455 §5). `opcode` 0x81 = text, 0x82 = binary.

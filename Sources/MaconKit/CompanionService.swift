@@ -19,6 +19,7 @@ public final class CompanionService {
                 port: UInt16,
                 store: PairingStore,
                 screen: ScreenBroadcaster? = nil,
+                control: (@Sendable (ControlEvent) -> Void)? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.store = store
         let data = CompanionData(runners: runners, runnerName: runnerName)
@@ -33,6 +34,7 @@ public final class CompanionService {
             build: { await data.build(id: $0) },
             logsSince: { await data.linesSince(buildID: $0, afterSeq: $1) },
             screen: screen,
+            control: control,
             onLog: onLog)
     }
 
