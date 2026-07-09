@@ -37,12 +37,20 @@ public final class CompanionServer: @unchecked Sendable {
     private let logsSince: LogsSince
     private let onLog: @Sendable (String) -> Void
 
+    /// Optional screen streaming: latest encoded frame source + start/stop control.
+    /// Nil disables the /screen route (e.g. the headless CLI).
+    private let screenFrames: ScreenFrameBox?
+    private let screenControl: (@Sendable (Bool) -> Void)?
+    private var screenViewers = 0          // touched only on `queue`
+
     public init(port: UInt16,
                 authorize: @escaping Authorize,
                 pair: @escaping Pair,
                 builds: @escaping Builds,
                 build: @escaping Build,
                 logsSince: @escaping LogsSince,
+                screenFrames: ScreenFrameBox? = nil,
+                screenControl: (@Sendable (Bool) -> Void)? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8899
         self.authorize = authorize
@@ -50,6 +58,8 @@ public final class CompanionServer: @unchecked Sendable {
         self.builds = builds
         self.build = build
         self.logsSince = logsSince
+        self.screenFrames = screenFrames
+        self.screenControl = screenControl
         self.onLog = onLog
     }
 
@@ -135,6 +145,13 @@ public final class CompanionServer: @unchecked Sendable {
             upgradeAndStream(conn, header: header, buildID: segs[1]); return
         }
 
+        // WS /screen — live screen frames (only if a frame source is wired up)
+        if method == "GET", path == "/screen",
+           headerValue(header, "upgrade")?.lowercased() == "websocket" {
+            guard screenFrames != nil else { respond(conn, "404 Not Found", json: nil); return }
+            upgradeAndStreamScreen(conn, header: header); return
+        }
+
         // GET /builds
         if method == "GET", path == "/builds" {
             Task { self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(await self.builds())) }
@@ -167,9 +184,15 @@ public final class CompanionServer: @unchecked Sendable {
 
     // MARK: WebSocket
 
-    /// One live log connection. `open` gates the push loop; the reader flips it
-    /// when the client disconnects.
-    private final class WSState: @unchecked Sendable { var open = true; var lastSeq = -1 }
+    /// One live socket. `open` gates the push loop; the reader flips it when the
+    /// client disconnects. `sending` prevents frames piling up faster than the
+    /// link drains. `onClose` runs once when the socket closes.
+    private final class WSState: @unchecked Sendable {
+        var open = true
+        var lastSeq = -1
+        var sending = false
+        var onClose: (@Sendable () -> Void)?
+    }
 
     private func upgradeAndStream(_ conn: NWConnection, header: String, buildID: String) {
         guard let key = headerValue(header, "sec-websocket-key") else { respond(conn, "400 Bad Request", json: nil); return }
@@ -194,7 +217,7 @@ public final class CompanionServer: @unchecked Sendable {
             let lines = await self.logsSince(buildID, state.lastSeq)
             for line in lines {
                 guard let data = try? CompanionJSON.encoder.encode(line) else { continue }
-                self.send(conn, frame: data)
+                self.send(conn, payload: data)
                 state.lastSeq = max(state.lastSeq, line.seq)
             }
             self.queue.asyncAfter(deadline: .now() + 0.4) { [weak self] in
@@ -206,14 +229,60 @@ public final class CompanionServer: @unchecked Sendable {
     /// We don't parse inbound frames — just notice when the socket closes.
     private func drainClient(_ conn: NWConnection, state: WSState) {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] _, _, isComplete, error in
-            if isComplete || error != nil { state.open = false; conn.cancel(); return }
+            if isComplete || error != nil {
+                state.open = false
+                state.onClose?(); state.onClose = nil
+                conn.cancel(); return
+            }
             self?.drainClient(conn, state: state)
         }
     }
 
-    /// Encode one unmasked server→client text frame (RFC 6455 §5).
-    private func send(_ conn: NWConnection, frame payload: Data) {
-        var frame = Data([0x81])                    // FIN + text opcode
+    // MARK: Screen streaming
+
+    /// Upgrade to WebSocket and push binary JPEG frames from the frame box.
+    private func upgradeAndStreamScreen(_ conn: NWConnection, header: String) {
+        guard let key = headerValue(header, "sec-websocket-key") else { respond(conn, "400 Bad Request", json: nil); return }
+        let magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+        let accept = Data(Insecure.SHA1.hash(data: Data((key + magic).utf8))).base64EncodedString()
+        let handshake = "HTTP/1.1 101 Switching Protocols\r\n"
+            + "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            + "Sec-WebSocket-Accept: \(accept)\r\n\r\n"
+
+        let state = WSState()
+        // First viewer starts capture; last viewer stops it. Runs on `queue`.
+        screenViewers += 1
+        if screenViewers == 1 { screenControl?(true) }
+        state.onClose = { [weak self] in
+            guard let self else { return }
+            self.queue.async {
+                self.screenViewers = max(0, self.screenViewers - 1)
+                if self.screenViewers == 0 { self.screenControl?(false) }
+            }
+        }
+
+        conn.send(content: Data(handshake.utf8), completion: .contentProcessed { [weak self] _ in
+            guard let self else { return }
+            self.drainClient(conn, state: state)
+            self.screenPushLoop(conn, state: state)
+        })
+    }
+
+    /// Send the latest frame whenever it changes; ~12 fps poll, one in flight.
+    private func screenPushLoop(_ conn: NWConnection, state: WSState) {
+        guard state.open else { conn.cancel(); return }
+        if !state.sending, let box = screenFrames, let frame = box.latest(), frame.seq != state.lastSeq {
+            state.lastSeq = frame.seq
+            state.sending = true
+            send(conn, payload: frame.data, opcode: 0x82) { state.sending = false }   // FIN + binary
+        }
+        queue.asyncAfter(deadline: .now() + 0.08) { [weak self] in self?.screenPushLoop(conn, state: state) }
+    }
+
+    /// Encode one unmasked server→client frame (RFC 6455 §5). `opcode` 0x81 = text, 0x82 = binary.
+    private func send(_ conn: NWConnection, payload: Data, opcode: UInt8 = 0x81,
+                      completion: (@Sendable () -> Void)? = nil) {
+        var frame = Data([opcode])
         let n = payload.count
         if n < 126 {
             frame.append(UInt8(n))
@@ -224,7 +293,7 @@ public final class CompanionServer: @unchecked Sendable {
             for shift in stride(from: 56, through: 0, by: -8) { frame.append(UInt8((n >> shift) & 0xFF)) }
         }
         frame.append(payload)
-        conn.send(content: frame, completion: .contentProcessed { _ in })
+        conn.send(content: frame, completion: .contentProcessed { _ in completion?() })
     }
 
     // MARK: Header helpers

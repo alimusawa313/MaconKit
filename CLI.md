@@ -244,8 +244,11 @@ macon companion revoke-all          # revoke every device
 | `--pair-ttl MIN` | `15` | pairing-code lifetime |
 | `--pair-code CODE` | random | pin a known code (e.g. to pair a second device later) |
 
-> **Scope:** the app currently monitors builds and streams logs. Screen streaming
-> (watch the Mac/simulator) is a planned later phase.
+> **Screen streaming:** from the **app** (Settings → Companion app → *Let paired
+> devices view this screen*), a paired device can also watch the Mac's screen live
+> — the app captures with ScreenCaptureKit and streams JPEG frames. This is an
+> app feature; `macon watch --companion` from the CLI serves builds + logs only
+> (a headless runner has no display to capture).
 
 ---
 
