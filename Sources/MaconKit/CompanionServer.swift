@@ -166,6 +166,13 @@ public final class CompanionServer: @unchecked Sendable {
             upgradeAndControl(conn, header: header); return
         }
 
+        // GET /apps — installed Mac apps for the shortcut deck (control-only).
+        if method == "GET", path == "/apps" {
+            guard control != nil else { respond(conn, "404 Not Found", json: nil); return }
+            let dto = CompanionAppsDTO(apps: InstalledApps.list())
+            respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(dto)); return
+        }
+
         // GET /builds
         if method == "GET", path == "/builds" {
             Task { self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(await self.builds())) }

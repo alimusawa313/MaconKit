@@ -42,6 +42,40 @@ public struct CompanionLogDTO: Codable, Sendable {
     public var level: String?            // "info" | "error"
 }
 
+/// `GET /apps` response — installed Mac apps, for the companion's shortcut deck.
+public struct CompanionAppsDTO: Codable, Sendable {
+    public var apps: [CompanionAppDTO]
+    public init(apps: [CompanionAppDTO]) { self.apps = apps }
+}
+
+public struct CompanionAppDTO: Codable, Sendable {
+    public var name: String
+    public var path: String
+    public init(name: String, path: String) { self.name = name; self.path = path }
+}
+
+/// Enumerate installed `.app` bundles in the standard locations (Foundation
+/// only — launching them is the app's job, via a `launch` control event).
+public enum InstalledApps {
+    public static func list() -> [CompanionAppDTO] {
+        let fm = FileManager.default
+        let dirs = ["/Applications", "/Applications/Utilities",
+                    "/System/Applications", "/System/Applications/Utilities",
+                    (fm.homeDirectoryForCurrentUser.path + "/Applications")]
+        var seen = Set<String>()
+        var apps: [CompanionAppDTO] = []
+        for dir in dirs {
+            guard let items = try? fm.contentsOfDirectory(atPath: dir) else { continue }
+            for item in items where item.hasSuffix(".app") {
+                let name = String(item.dropLast(4))
+                guard seen.insert(name).inserted else { continue }
+                apps.append(CompanionAppDTO(name: name, path: "\(dir)/\(item)"))
+            }
+        }
+        return apps.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+}
+
 /// `POST /pair` request / response.
 public struct CompanionPairRequestDTO: Codable, Sendable {
     public var code: String
