@@ -18,8 +18,7 @@ public final class CompanionService {
                 runnerName: String,
                 port: UInt16,
                 store: PairingStore,
-                screenFrames: ScreenFrameBox? = nil,
-                screenControl: (@Sendable (Bool) -> Void)? = nil,
+                screen: ScreenBroadcaster? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.store = store
         let data = CompanionData(runners: runners, runnerName: runnerName)
@@ -33,8 +32,7 @@ public final class CompanionService {
             builds: { await data.builds() },
             build: { await data.build(id: $0) },
             logsSince: { await data.linesSince(buildID: $0, afterSeq: $1) },
-            screenFrames: screenFrames,
-            screenControl: screenControl,
+            screen: screen,
             onLog: onLog)
     }
 

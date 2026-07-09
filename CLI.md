@@ -246,9 +246,9 @@ macon companion revoke-all          # revoke every device
 
 > **Screen streaming:** from the **app** (Settings → Companion app → *Let paired
 > devices view this screen*), a paired device can also watch the Mac's screen live
-> — the app captures with ScreenCaptureKit and streams JPEG frames. This is an
-> app feature; `macon watch --companion` from the CLI serves builds + logs only
-> (a headless runner has no display to capture).
+> — the app captures with ScreenCaptureKit and hardware-encodes H.264 (VideoToolbox)
+> at up to 60–120 fps. This is an app feature; `macon watch --companion` from the
+> CLI serves builds + logs only (a headless runner has no display to capture).
 
 ---
 

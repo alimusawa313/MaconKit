@@ -37,11 +37,9 @@ public final class CompanionServer: @unchecked Sendable {
     private let logsSince: LogsSince
     private let onLog: @Sendable (String) -> Void
 
-    /// Optional screen streaming: latest encoded frame source + start/stop control.
-    /// Nil disables the /screen route (e.g. the headless CLI).
-    private let screenFrames: ScreenFrameBox?
-    private let screenControl: (@Sendable (Bool) -> Void)?
-    private var screenViewers = 0          // touched only on `queue`
+    /// Optional H.264 screen streaming. Nil disables the /screen route (e.g. the
+    /// headless CLI, which has no display to capture).
+    private let screen: ScreenBroadcaster?
 
     public init(port: UInt16,
                 authorize: @escaping Authorize,
@@ -49,8 +47,7 @@ public final class CompanionServer: @unchecked Sendable {
                 builds: @escaping Builds,
                 build: @escaping Build,
                 logsSince: @escaping LogsSince,
-                screenFrames: ScreenFrameBox? = nil,
-                screenControl: (@Sendable (Bool) -> Void)? = nil,
+                screen: ScreenBroadcaster? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8899
         self.authorize = authorize
@@ -58,8 +55,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.builds = builds
         self.build = build
         self.logsSince = logsSince
-        self.screenFrames = screenFrames
-        self.screenControl = screenControl
+        self.screen = screen
         self.onLog = onLog
     }
 
@@ -145,10 +141,10 @@ public final class CompanionServer: @unchecked Sendable {
             upgradeAndStream(conn, header: header, buildID: segs[1]); return
         }
 
-        // WS /screen — live screen frames (only if a frame source is wired up)
+        // WS /screen — live H.264 screen stream (only if a source is wired up)
         if method == "GET", path == "/screen",
            headerValue(header, "upgrade")?.lowercased() == "websocket" {
-            guard screenFrames != nil else { respond(conn, "404 Not Found", json: nil); return }
+            guard screen != nil else { respond(conn, "404 Not Found", json: nil); return }
             upgradeAndStreamScreen(conn, header: header); return
         }
 
@@ -191,6 +187,7 @@ public final class CompanionServer: @unchecked Sendable {
         var open = true
         var lastSeq = -1
         var sending = false
+        var dropped = false
         var onClose: (@Sendable () -> Void)?
     }
 
@@ -240,8 +237,11 @@ public final class CompanionServer: @unchecked Sendable {
 
     // MARK: Screen streaming
 
-    /// Upgrade to WebSocket and push binary JPEG frames from the frame box.
+    /// Upgrade to WebSocket and push encoded H.264 packets from the broadcaster.
+    /// Each viewer is a sink; if it falls behind, frames are dropped and an IDR
+    /// is requested so the decoder recovers at the next keyframe.
     private func upgradeAndStreamScreen(_ conn: NWConnection, header: String) {
+        guard let broadcaster = screen else { respond(conn, "404 Not Found", json: nil); return }
         guard let key = headerValue(header, "sec-websocket-key") else { respond(conn, "400 Bad Request", json: nil); return }
         let magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
         let accept = Data(Insecure.SHA1.hash(data: Data((key + magic).utf8))).base64EncodedString()
@@ -249,34 +249,27 @@ public final class CompanionServer: @unchecked Sendable {
             + "Upgrade: websocket\r\nConnection: Upgrade\r\n"
             + "Sec-WebSocket-Accept: \(accept)\r\n\r\n"
 
+        let id = ObjectIdentifier(conn)
         let state = WSState()
-        // First viewer starts capture; last viewer stops it. Runs on `queue`.
-        screenViewers += 1
-        if screenViewers == 1 { screenControl?(true) }
-        state.onClose = { [weak self] in
-            guard let self else { return }
-            self.queue.async {
-                self.screenViewers = max(0, self.screenViewers - 1)
-                if self.screenViewers == 0 { self.screenControl?(false) }
-            }
-        }
+        state.onClose = { broadcaster.removeViewer(id) }
 
         conn.send(content: Data(handshake.utf8), completion: .contentProcessed { [weak self] _ in
             guard let self else { return }
             self.drainClient(conn, state: state)
-            self.screenPushLoop(conn, state: state)
+            // Deliver each packet in order; one send in flight to avoid pile-up.
+            broadcaster.addViewer(id) { [weak self, weak conn] packet in
+                guard let self, let conn else { return }
+                self.queue.async {
+                    guard state.open else { return }
+                    if state.sending { state.dropped = true; return }
+                    state.sending = true
+                    self.send(conn, payload: packet, opcode: 0x82) {
+                        state.sending = false
+                        if state.dropped { state.dropped = false; broadcaster.onNeedKeyframe?() }
+                    }
+                }
+            }
         })
-    }
-
-    /// Send the latest frame whenever it changes; ~12 fps poll, one in flight.
-    private func screenPushLoop(_ conn: NWConnection, state: WSState) {
-        guard state.open else { conn.cancel(); return }
-        if !state.sending, let box = screenFrames, let frame = box.latest(), frame.seq != state.lastSeq {
-            state.lastSeq = frame.seq
-            state.sending = true
-            send(conn, payload: frame.data, opcode: 0x82) { state.sending = false }   // FIN + binary
-        }
-        queue.asyncAfter(deadline: .now() + 0.08) { [weak self] in self?.screenPushLoop(conn, state: state) }
     }
 
     /// Encode one unmasked server→client frame (RFC 6455 §5). `opcode` 0x81 = text, 0x82 = binary.
