@@ -17,6 +17,8 @@ import Foundation
 public final class ScreenBroadcaster: @unchecked Sendable {
     private let lock = NSLock()
     private var sinks: [ObjectIdentifier: @Sendable (Data) -> Void] = [:]
+    private var sentCount = 0
+    private var droppedCount = 0
 
     /// Start/stop screen capture (first viewer arrives / last leaves).
     public var onActive: (@Sendable (Bool) -> Void)?
@@ -24,6 +26,17 @@ public final class ScreenBroadcaster: @unchecked Sendable {
     public var onNeedKeyframe: (@Sendable () -> Void)?
 
     public init() {}
+
+    // MARK: Delivery stats (fed by the server, polled by the bitrate controller)
+
+    public func noteSent() { lock.lock(); sentCount += 1; lock.unlock() }
+    public func noteDropped() { lock.lock(); droppedCount += 1; lock.unlock() }
+
+    /// Return and reset the counters — one adaptation window.
+    public func takeStats() -> (sent: Int, dropped: Int) {
+        lock.lock(); defer { sentCount = 0; droppedCount = 0; lock.unlock() }
+        return (sentCount, droppedCount)
+    }
 
     /// Called by the encoder for every encoded packet.
     public func publish(_ packet: Data) {

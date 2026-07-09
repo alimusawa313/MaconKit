@@ -70,8 +70,13 @@ public final class CompanionServer: @unchecked Sendable {
     public func start() {
         queue.async { [self] in
             guard listener == nil else { return }
-            let params = NWParameters.tcp
+            // Latency-tuned TCP: no Nagle batching, and QoS-tagged as
+            // interactive video so Wi-Fi (WMM) prioritizes our packets.
+            let tcp = NWProtocolTCP.Options()
+            tcp.noDelay = true
+            let params = NWParameters(tls: nil, tcp: tcp)
             params.allowLocalEndpointReuse = true
+            params.serviceClass = .interactiveVideo
             do {
                 let l = try NWListener(using: params, on: port)
                 l.newConnectionHandler = { [weak self] conn in self?.accept(conn) }
@@ -278,15 +283,17 @@ public final class CompanionServer: @unchecked Sendable {
                 self.queue.async {
                     guard state.open else { return }
                     if state.sending {
+                        broadcaster.noteDropped()            // link can't keep up
                         if !state.awaitingKey { state.awaitingKey = true; broadcaster.onNeedKeyframe?() }
                         return
                     }
                     if state.awaitingKey {
                         let isKeyframe = (packet.first ?? 0) & 1 == 1
-                        guard isKeyframe else { return }     // skip corrupt P-frames
+                        guard isKeyframe else { broadcaster.noteDropped(); return }  // skip corrupt P-frames
                         state.awaitingKey = false
                     }
                     state.sending = true
+                    broadcaster.noteSent()
                     self.send(conn, payload: packet, opcode: 0x82) { state.sending = false }
                 }
             }
