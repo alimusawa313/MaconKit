@@ -637,6 +637,10 @@ case "companion":
           macon watch --workspace WS --repo SLUG --companion [--companion-port 8899]
         Pair the app with the printed code. Behind a cloudflared tunnel, point the
         app at the tunnel host (wss), not the LAN address.
+
+        Note: the headless CLI serves builds + live logs only (it has no display).
+        Screen streaming, remote control, the privacy screen, and one-tap remote
+        access come with the MacOn desktop app's companion server.
         """)
     }
 
@@ -670,7 +674,8 @@ case "help", "--help", "-h":
         --dir PATH                 checkout dir (default: ~/macon-ci/<repo>)
         --no-status                don't post build status back to the host
         --email E --token T        Bitbucket auth (or env BITBUCKET_EMAIL / BITBUCKET_API_TOKEN)
-        --companion                serve the iPhone/iPad companion app (monitor builds + live logs)
+        --companion                serve the iPhone/iPad companion app (builds + live logs;
+                                   screen/control/privacy are desktop-app features)
         --companion-port N         companion server port (default: 8899)
         --pair-ttl MIN             pairing-code lifetime (default: 15)
         --pair-code CODE           use a fixed pairing code instead of a random one

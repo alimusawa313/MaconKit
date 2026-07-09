@@ -101,6 +101,12 @@ the port via a `cloudflared` tunnel — the app speaks HTTPS/WSS. Manage devices
 `macon companion devices | revoke <prefix> | revoke-all`. Full details in
 **[CLI.md](CLI.md#macon-companion--iphoneipad-app)**.
 
+The headless CLI serves **builds + live logs** only. The **MacOn desktop app**'s
+companion server adds live **screen streaming** (hardware H.264), **remote
+control** (cursor, keyboard, a virtual trackpad, and Mac gestures), a **privacy
+screen** for the Mac while you drive it remotely, and **one-tap remote access**
+(it opens the `cloudflared` tunnel for you) — see the app's Settings → Companion app.
+
 ## First run: `macon init`
 
 Before watching anything, check the machine has what an iOS build needs:
