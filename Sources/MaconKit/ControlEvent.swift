@@ -10,7 +10,7 @@
 import Foundation
 
 public struct ControlEvent: Codable, Sendable {
-    /// "move" | "click" | "scroll" | "text" | "key"
+    /// "move" | "click" | "scroll" | "text" | "key" | "combo"
     public var t: String
     public var x: Double?          // normalized cursor position
     public var y: Double?
@@ -19,8 +19,9 @@ public struct ControlEvent: Codable, Sendable {
     public var dx: Double?         // scroll delta (points)
     public var dy: Double?
     public var s: String?          // typed text (unicode)
-    public var code: Int?          // special virtual key code
+    public var code: Int?          // virtual key code (key / combo)
     public var down: Bool?         // key down vs up
+    public var mods: [String]?     // "cmd" | "ctrl" | "opt" | "shift" (combo chords)
 
     public init(t: String) { self.t = t }
 }
