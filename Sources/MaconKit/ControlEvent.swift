@@ -10,7 +10,8 @@
 import Foundation
 
 public struct ControlEvent: Codable, Sendable {
-    /// "move" | "click" | "scroll" | "text" | "key" | "combo" | "media" | "volume"
+    /// "move" | "movedelta" | "mouse" | "click" | "scroll" | "text" | "key" |
+    /// "combo" | "media" | "volume" | "fps" | "res"
     public var t: String
     public var x: Double?          // normalized cursor position
     public var y: Double?
