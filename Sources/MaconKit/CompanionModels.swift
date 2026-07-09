@@ -51,7 +51,10 @@ public struct CompanionAppsDTO: Codable, Sendable {
 public struct CompanionAppDTO: Codable, Sendable {
     public var name: String
     public var path: String
-    public init(name: String, path: String) { self.name = name; self.path = path }
+    public var icon: String?     // base64 PNG (app supplies via AppKit); nil headless
+    public init(name: String, path: String, icon: String? = nil) {
+        self.name = name; self.path = path; self.icon = icon
+    }
 }
 
 /// Enumerate installed `.app` bundles in the standard locations (Foundation

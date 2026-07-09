@@ -42,6 +42,9 @@ public final class CompanionServer: @unchecked Sendable {
     private let screen: ScreenBroadcaster?
     /// Optional remote-control sink. Nil disables the /control route.
     private let control: (@Sendable (ControlEvent) -> Void)?
+    /// Optional installed-app catalog (the app supplies one with icons). Falls
+    /// back to a Foundation-only, icon-less enumeration.
+    private let apps: (@Sendable () -> CompanionAppsDTO)?
 
     private static let controlDecoder = JSONDecoder()
 
@@ -53,6 +56,7 @@ public final class CompanionServer: @unchecked Sendable {
                 logsSince: @escaping LogsSince,
                 screen: ScreenBroadcaster? = nil,
                 control: (@Sendable (ControlEvent) -> Void)? = nil,
+                apps: (@Sendable () -> CompanionAppsDTO)? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8899
         self.authorize = authorize
@@ -62,6 +66,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.logsSince = logsSince
         self.screen = screen
         self.control = control
+        self.apps = apps
         self.onLog = onLog
     }
 
@@ -169,8 +174,12 @@ public final class CompanionServer: @unchecked Sendable {
         // GET /apps — installed Mac apps for the shortcut deck (control-only).
         if method == "GET", path == "/apps" {
             guard control != nil else { respond(conn, "404 Not Found", json: nil); return }
-            let dto = CompanionAppsDTO(apps: InstalledApps.list())
-            respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(dto)); return
+            let provided = apps
+            Task {
+                let dto = provided?() ?? CompanionAppsDTO(apps: InstalledApps.list())
+                self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(dto))
+            }
+            return
         }
 
         // GET /builds

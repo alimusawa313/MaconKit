@@ -20,6 +20,7 @@ public final class CompanionService {
                 store: PairingStore,
                 screen: ScreenBroadcaster? = nil,
                 control: (@Sendable (ControlEvent) -> Void)? = nil,
+                apps: (@Sendable () -> CompanionAppsDTO)? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.store = store
         let data = CompanionData(runners: runners, runnerName: runnerName)
@@ -35,6 +36,7 @@ public final class CompanionService {
             logsSince: { await data.linesSince(buildID: $0, afterSeq: $1) },
             screen: screen,
             control: control,
+            apps: apps,
             onLog: onLog)
     }
 
