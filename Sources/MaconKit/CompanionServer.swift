@@ -200,7 +200,7 @@ public final class CompanionServer: @unchecked Sendable {
         var open = true
         var lastSeq = -1
         var sending = false
-        var dropped = false
+        var awaitingKey = false          // dropped a frame → wait for an IDR to resync
         var onClose: (@Sendable () -> Void)?
     }
 
@@ -269,17 +269,25 @@ public final class CompanionServer: @unchecked Sendable {
         conn.send(content: Data(handshake.utf8), completion: .contentProcessed { [weak self] _ in
             guard let self else { return }
             self.drainClient(conn, state: state)
-            // Deliver each packet in order; one send in flight to avoid pile-up.
+            // Deliver packets in order, one send in flight. If the link can't keep
+            // up we must NOT send a P-frame whose reference we skipped — that
+            // corrupts everything until the next keyframe (the "glitch"). Instead,
+            // drop, ask for an IDR, and resume only when that keyframe arrives.
             broadcaster.addViewer(id) { [weak self, weak conn] packet in
                 guard let self, let conn else { return }
                 self.queue.async {
                     guard state.open else { return }
-                    if state.sending { state.dropped = true; return }
-                    state.sending = true
-                    self.send(conn, payload: packet, opcode: 0x82) {
-                        state.sending = false
-                        if state.dropped { state.dropped = false; broadcaster.onNeedKeyframe?() }
+                    if state.sending {
+                        if !state.awaitingKey { state.awaitingKey = true; broadcaster.onNeedKeyframe?() }
+                        return
                     }
+                    if state.awaitingKey {
+                        let isKeyframe = (packet.first ?? 0) & 1 == 1
+                        guard isKeyframe else { return }     // skip corrupt P-frames
+                        state.awaitingKey = false
+                    }
+                    state.sending = true
+                    self.send(conn, payload: packet, opcode: 0x82) { state.sending = false }
                 }
             }
         })
