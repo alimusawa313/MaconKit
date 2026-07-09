@@ -288,7 +288,10 @@ public final class CompanionServer: @unchecked Sendable {
             // draining do we drop. After a drop we must NOT send a P-frame
             // whose reference was skipped (that's the "glitch") — drop until
             // the next IDR, which we request immediately.
-            let budget = 768 * 1024                          // ~250ms at 25 Mbps
+            // Sized to absorb a full-screen-motion burst (Mission Control, app
+            // switch): a transient ~1.5 MB backlog ≈ 270 ms at 45 Mbps — better
+            // a brief latency bump than a drop→IDR stutter.
+            let budget = 1536 * 1024
             broadcaster.addViewer(id) { [weak conn] packet in
                 guard let conn, state.open else { return }
                 state.sendLock.lock()
