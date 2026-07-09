@@ -207,6 +207,12 @@ public final class CompanionServer: @unchecked Sendable {
         var sending = false
         var awaitingKey = false          // dropped a frame → wait for an IDR to resync
         var onClose: (@Sendable () -> Void)?
+
+        // Screen path: bytes handed to the connection but not yet accepted by
+        // the transport. Guarded by its own lock so the frame path never has
+        // to hop through the server's shared queue.
+        let sendLock = NSLock()
+        var inflightBytes = 0
     }
 
     private func upgradeAndStream(_ conn: NWConnection, header: String, buildID: String) {
@@ -274,28 +280,52 @@ public final class CompanionServer: @unchecked Sendable {
         conn.send(content: Data(handshake.utf8), completion: .contentProcessed { [weak self] _ in
             guard let self else { return }
             self.drainClient(conn, state: state)
-            // Deliver packets in order, one send in flight. If the link can't keep
-            // up we must NOT send a P-frame whose reference we skipped — that
-            // corrupts everything until the next keyframe (the "glitch"). Instead,
-            // drop, ask for an IDR, and resume only when that keyframe arrives.
-            broadcaster.addViewer(id) { [weak self, weak conn] packet in
-                guard let self, let conn else { return }
-                self.queue.async {
-                    guard state.open else { return }
-                    if state.sending {
-                        broadcaster.noteDropped()            // link can't keep up
-                        if !state.awaitingKey { state.awaitingKey = true; broadcaster.onNeedKeyframe?() }
+            // Frames go straight from the encoder thread to conn.send (thread-
+            // safe) — never through the server's shared queue, which also
+            // carries control traffic and would stall the 60fps cadence.
+            // Backpressure is a bytes-in-flight budget: TCP keeps ordering, so
+            // several frames may be in flight; only when the transport stops
+            // draining do we drop. After a drop we must NOT send a P-frame
+            // whose reference was skipped (that's the "glitch") — drop until
+            // the next IDR, which we request immediately.
+            let budget = 768 * 1024                          // ~250ms at 25 Mbps
+            broadcaster.addViewer(id) { [weak conn] packet in
+                guard let conn, state.open else { return }
+                state.sendLock.lock()
+                if state.inflightBytes > budget {
+                    let firstDrop = !state.awaitingKey
+                    state.awaitingKey = true
+                    state.sendLock.unlock()
+                    broadcaster.noteDropped()
+                    if firstDrop { broadcaster.onNeedKeyframe?() }
+                    return
+                }
+                if state.awaitingKey {
+                    guard (packet.first ?? 0) & 1 == 1 else {   // skip corrupt P-frames
+                        state.sendLock.unlock()
+                        broadcaster.noteDropped()
                         return
                     }
-                    if state.awaitingKey {
-                        let isKeyframe = (packet.first ?? 0) & 1 == 1
-                        guard isKeyframe else { broadcaster.noteDropped(); return }  // skip corrupt P-frames
-                        state.awaitingKey = false
-                    }
-                    state.sending = true
-                    broadcaster.noteSent()
-                    self.send(conn, payload: packet, opcode: 0x82) { state.sending = false }
+                    state.awaitingKey = false
                 }
+                state.inflightBytes += packet.count
+                state.sendLock.unlock()
+                broadcaster.noteSent()
+
+                var frame = Data([0x82])
+                let n = packet.count
+                if n < 126 {
+                    frame.append(UInt8(n))
+                } else if n <= 0xFFFF {
+                    frame.append(126); frame.append(UInt8(n >> 8)); frame.append(UInt8(n & 0xFF))
+                } else {
+                    frame.append(127)
+                    for shift in stride(from: 56, through: 0, by: -8) { frame.append(UInt8((n >> shift) & 0xFF)) }
+                }
+                frame.append(packet)
+                conn.send(content: frame, completion: .contentProcessed { _ in
+                    state.sendLock.lock(); state.inflightBytes -= packet.count; state.sendLock.unlock()
+                })
             }
         })
     }
