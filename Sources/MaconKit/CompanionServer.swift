@@ -44,15 +44,21 @@ public final class CompanionServer: @unchecked Sendable {
         public var remove: @Sendable (String) async -> Bool
         public var watch: @Sendable (String, Bool) async -> Bool
         public var run: @Sendable (String) async -> Bool
+        /// Provider lookups for the editor's pickers (provider, workspace[, repo]).
+        public var repos: @Sendable (String, String) async -> [String]?
+        public var branches: @Sendable (String, String, String) async -> [String]?
 
         public init(list: @escaping @Sendable () async -> CompanionPipelinesDTO,
                     create: @escaping @Sendable (Data) async -> Bool,
                     update: @escaping @Sendable (String, Data) async -> Bool,
                     remove: @escaping @Sendable (String) async -> Bool,
                     watch: @escaping @Sendable (String, Bool) async -> Bool,
-                    run: @escaping @Sendable (String) async -> Bool) {
+                    run: @escaping @Sendable (String) async -> Bool,
+                    repos: @escaping @Sendable (String, String) async -> [String]? = { _, _ in nil },
+                    branches: @escaping @Sendable (String, String, String) async -> [String]? = { _, _, _ in nil }) {
             self.list = list; self.create = create; self.update = update
             self.remove = remove; self.watch = watch; self.run = run
+            self.repos = repos; self.branches = branches
         }
     }
 
@@ -169,6 +175,17 @@ public final class CompanionServer: @unchecked Sendable {
         let rawPath = parts.count > 1 ? String(parts[1]) : "/"
         let path = rawPath.split(separator: "?").first.map(String.init) ?? rawPath
         let segs = path.split(separator: "/").map(String.init)
+        // ?key=value query params (percent-decoded).
+        let query: [String: String] = {
+            guard let q = rawPath.split(separator: "?").dropFirst().first else { return [:] }
+            var out: [String: String] = [:]
+            for pair in q.split(separator: "&") {
+                let kv = pair.split(separator: "=", maxSplits: 1)
+                guard kv.count == 2 else { continue }
+                out[String(kv[0])] = String(kv[1]).removingPercentEncoding ?? String(kv[1])
+            }
+            return out
+        }()
 
         // POST /pair — the only unauthenticated route.
         if method == "POST", path == "/pair" {
@@ -252,6 +269,31 @@ public final class CompanionServer: @unchecked Sendable {
             // GET /pipelines
             if method == "GET", segs.count == 1 {
                 Task { self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(await ops.list())) }
+                return
+            }
+            // GET /pipelines/repos?provider=&workspace= — for the editor's picker
+            if method == "GET", segs.count == 2, segs[1] == "repos" {
+                let provider = query["provider"] ?? "bitbucket"
+                let ws = query["workspace"] ?? ""
+                Task {
+                    if let names = await ops.repos(provider, ws) {
+                        self.respond(conn, "200 OK",
+                                     json: try? CompanionJSON.encoder.encode(CompanionListDTO(values: names)))
+                    } else { self.respond(conn, "502 Bad Gateway", json: nil) }
+                }
+                return
+            }
+            // GET /pipelines/branches?provider=&workspace=&repo=
+            if method == "GET", segs.count == 2, segs[1] == "branches" {
+                let provider = query["provider"] ?? "bitbucket"
+                let ws = query["workspace"] ?? ""
+                let repo = query["repo"] ?? ""
+                Task {
+                    if let names = await ops.branches(provider, ws, repo) {
+                        self.respond(conn, "200 OK",
+                                     json: try? CompanionJSON.encoder.encode(CompanionListDTO(values: names)))
+                    } else { self.respond(conn, "502 Bad Gateway", json: nil) }
+                }
                 return
             }
             // POST /pipelines — create

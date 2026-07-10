@@ -34,7 +34,9 @@ public final class CompanionService {
             update: { await data.updatePipeline(id: $0, $1) },
             remove: { await data.deletePipeline(id: $0) },
             watch: { await data.setWatching(id: $0, on: $1) },
-            run: { await data.runPipeline(id: $0) })
+            run: { await data.runPipeline(id: $0) },
+            repos: { await data.listRepos(provider: $0, workspace: $1) },
+            branches: { await data.listBranches(provider: $0, workspace: $1, repo: $2) })
 
         self.server = CompanionServer(
             port: port,

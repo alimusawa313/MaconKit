@@ -147,6 +147,21 @@ public final class CompanionData {
         return true
     }
 
+    /// Repo names under a workspace/owner, via the Mac's saved credentials.
+    /// Nil when the provider/credentials can't serve the request.
+    public func listRepos(provider: String, workspace: String) async -> [String]? {
+        guard let kind = GitProviderKind(rawValue: provider),
+              let client = pool?.makeClient(for: kind) else { return nil }
+        return try? await client.listRepositories(workspace: workspace)
+    }
+
+    /// Branch names in a repo, via the Mac's saved credentials.
+    public func listBranches(provider: String, workspace: String, repo: String) async -> [String]? {
+        guard let kind = GitProviderKind(rawValue: provider),
+              let client = pool?.makeClient(for: kind) else { return nil }
+        return try? await client.listBranches(workspace: workspace, repo: repo)
+    }
+
     private func runner(_ id: String) -> PipelineRunner? {
         runnersProvider().first { $0.config.id.uuidString == id }
     }

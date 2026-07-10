@@ -129,6 +129,12 @@ public enum InstalledApps {
     }
 }
 
+/// A plain list of names (repos, branches) for the app's pickers.
+public struct CompanionListDTO: Codable, Sendable {
+    public var values: [String]
+    public init(values: [String]) { self.values = values }
+}
+
 /// `POST /pair` request / response.
 public struct CompanionPairRequestDTO: Codable, Sendable {
     public var code: String
