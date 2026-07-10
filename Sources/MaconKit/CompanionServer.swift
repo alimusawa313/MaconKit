@@ -11,6 +11,11 @@
 //    POST /builds/{id}/rerun    (Bearer)   trigger a fresh run of its pipeline
 //    POST /builds/{id}/cancel   (Bearer)   stop it if it's building
 //    WS   /builds/{id}/logs     (Bearer)   live log tail
+//    GET  /pipelines            (Bearer)   configured pipelines + live state
+//    POST /pipelines            (Bearer)   create a pipeline
+//    PUT  /pipelines/{id}       (Bearer)   update a pipeline's config
+//    DELETE /pipelines/{id}     (Bearer)   remove a pipeline
+//    POST /pipelines/{id}/watch|unwatch|run  (Bearer)  runner controls
 //
 //  Meant to sit behind a cloudflared tunnel (which terminates TLS), so a
 //  headless EC2 Mac is reachable at a stable https/wss URL.
@@ -30,6 +35,27 @@ public final class CompanionServer: @unchecked Sendable {
     /// Run a build action ("rerun" | "cancel"); returns whether it applied.
     public typealias BuildActionFn = @Sendable (_ id: String, _ action: String) async -> Bool
 
+    /// Pipeline management callbacks (nil = the /pipelines routes 404, e.g. a
+    /// headless CLI running from a fixed config file).
+    public struct PipelineOps: Sendable {
+        public var list: @Sendable () async -> CompanionPipelinesDTO
+        public var create: @Sendable (Data) async -> Bool
+        public var update: @Sendable (String, Data) async -> Bool
+        public var remove: @Sendable (String) async -> Bool
+        public var watch: @Sendable (String, Bool) async -> Bool
+        public var run: @Sendable (String) async -> Bool
+
+        public init(list: @escaping @Sendable () async -> CompanionPipelinesDTO,
+                    create: @escaping @Sendable (Data) async -> Bool,
+                    update: @escaping @Sendable (String, Data) async -> Bool,
+                    remove: @escaping @Sendable (String) async -> Bool,
+                    watch: @escaping @Sendable (String, Bool) async -> Bool,
+                    run: @escaping @Sendable (String) async -> Bool) {
+            self.list = list; self.create = create; self.update = update
+            self.remove = remove; self.watch = watch; self.run = run
+        }
+    }
+
     private let port: NWEndpoint.Port
     private let queue = DispatchQueue(label: "macon.companion")
     private var listener: NWListener?
@@ -40,6 +66,7 @@ public final class CompanionServer: @unchecked Sendable {
     private let build: Build
     private let logsSince: LogsSince
     private let buildAction: BuildActionFn?
+    private let pipelineOps: PipelineOps?
     private let onLog: @Sendable (String) -> Void
 
     /// Optional H.264 screen streaming. Nil disables the /screen route (e.g. the
@@ -60,6 +87,7 @@ public final class CompanionServer: @unchecked Sendable {
                 build: @escaping Build,
                 logsSince: @escaping LogsSince,
                 buildAction: BuildActionFn? = nil,
+                pipelineOps: PipelineOps? = nil,
                 screen: ScreenBroadcaster? = nil,
                 control: (@Sendable (ControlEvent) -> Void)? = nil,
                 apps: (@Sendable () -> CompanionAppsDTO)? = nil,
@@ -71,6 +99,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.build = build
         self.logsSince = logsSince
         self.buildAction = buildAction
+        self.pipelineOps = pipelineOps
         self.screen = screen
         self.control = control
         self.apps = apps
@@ -214,6 +243,49 @@ public final class CompanionServer: @unchecked Sendable {
                 self.respond(conn, ok ? "200 OK" : "409 Conflict", json: nil)
             }
             return
+        }
+
+        // /pipelines — remote pipeline management (mirrors the Mac app's UI).
+        if segs.first == "pipelines" {
+            guard let ops = pipelineOps else { respond(conn, "404 Not Found", json: nil); return }
+
+            // GET /pipelines
+            if method == "GET", segs.count == 1 {
+                Task { self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(await ops.list())) }
+                return
+            }
+            // POST /pipelines — create
+            if method == "POST", segs.count == 1 {
+                Task { self.respond(conn, await ops.create(body) ? "200 OK" : "422 Unprocessable Entity", json: nil) }
+                return
+            }
+            // PUT /pipelines/{id} — update config
+            if method == "PUT", segs.count == 2 {
+                let id = segs[1]
+                Task { self.respond(conn, await ops.update(id, body) ? "200 OK" : "404 Not Found", json: nil) }
+                return
+            }
+            // DELETE /pipelines/{id}
+            if method == "DELETE", segs.count == 2 {
+                let id = segs[1]
+                Task { self.respond(conn, await ops.remove(id) ? "200 OK" : "404 Not Found", json: nil) }
+                return
+            }
+            // POST /pipelines/{id}/watch | unwatch | run
+            if method == "POST", segs.count == 3 {
+                let id = segs[1]
+                switch segs[2] {
+                case "watch":
+                    Task { self.respond(conn, await ops.watch(id, true) ? "200 OK" : "404 Not Found", json: nil) }
+                case "unwatch":
+                    Task { self.respond(conn, await ops.watch(id, false) ? "200 OK" : "404 Not Found", json: nil) }
+                case "run":
+                    Task { self.respond(conn, await ops.run(id) ? "200 OK" : "404 Not Found", json: nil) }
+                default:
+                    respond(conn, "404 Not Found", json: nil)
+                }
+                return
+            }
         }
 
         respond(conn, "404 Not Found", json: nil)

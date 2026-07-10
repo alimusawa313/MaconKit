@@ -20,10 +20,15 @@ public final class CompanionData {
     private let runnersProvider: () -> [PipelineRunner]
     private let runnerName: String
     private let historyLimit = 20
+    /// When present, paired devices may manage pipelines (add/edit/delete/watch)
+    /// — the same operations the Mac app's UI performs on this pool.
+    private weak var pool: PipelinePool?
 
-    public init(runners: @escaping () -> [PipelineRunner], runnerName: String) {
+    public init(runners: @escaping () -> [PipelineRunner], runnerName: String,
+                pool: PipelinePool? = nil) {
         self.runnersProvider = runners
         self.runnerName = runnerName
+        self.pool = pool
     }
 
     public func builds() -> CompanionBuildsDTO {
@@ -89,8 +94,103 @@ public final class CompanionData {
         }
         return lines.filter { $0.id > afterSeq }.map {
             CompanionLogDTO(seq: $0.id, text: $0.text.strippingANSI(),
-                            level: CompanionJSON.level(for: $0.text))
+                            level: CompanionJSON.level(for: $0.text), date: $0.date)
         }
+    }
+
+    // MARK: Pipeline management
+
+    /// The configured pipelines with their live state.
+    public func pipelines() -> CompanionPipelinesDTO {
+        CompanionPipelinesDTO(pipelines: runnersProvider().map { dto($0) })
+    }
+
+    /// Create a pipeline from a submitted config. Fails without a pool.
+    public func createPipeline(_ body: Data) -> Bool {
+        guard let pool,
+              let dto = try? CompanionJSON.decoder.decode(CompanionPipelineDTO.self, from: body)
+        else { return false }
+        let runner = pool.addPipeline()
+        apply(dto, to: runner)
+        pool.commitEdits()
+        return true
+    }
+
+    /// Update an existing pipeline's config.
+    public func updatePipeline(id: String, _ body: Data) -> Bool {
+        guard let pool, let runner = runner(id),
+              let dto = try? CompanionJSON.decoder.decode(CompanionPipelineDTO.self, from: body)
+        else { return false }
+        apply(dto, to: runner)
+        pool.commitEdits()
+        return true
+    }
+
+    /// Remove a pipeline (stops its watcher first, like the Mac app).
+    public func deletePipeline(id: String) -> Bool {
+        guard let pool, let runner = runner(id) else { return false }
+        pool.remove(runner)
+        return true
+    }
+
+    /// Start/stop watching (the runner toggle in the Mac app's footer).
+    public func setWatching(id: String, on: Bool) -> Bool {
+        guard let runner = runner(id) else { return false }
+        if on { runner.startWatching() } else { runner.stopWatching() }
+        return true
+    }
+
+    /// Build the current head immediately ("Run Now").
+    public func runPipeline(id: String) -> Bool {
+        guard let runner = runner(id) else { return false }
+        runner.runNow()
+        return true
+    }
+
+    private func runner(_ id: String) -> PipelineRunner? {
+        runnersProvider().first { $0.config.id.uuidString == id }
+    }
+
+    private func dto(_ r: PipelineRunner) -> CompanionPipelineDTO {
+        let c = r.config
+        let state: String
+        switch r.buildState {
+        case .idle:      state = "idle"
+        case .running:   state = "running"
+        case .succeeded: state = "passed"
+        case .failed:    state = "failed"
+        }
+        return CompanionPipelineDTO(
+            id: c.id.uuidString, name: c.name, provider: c.provider.rawValue,
+            workspace: c.workspace, repoSlug: c.repoSlug, branch: c.branch,
+            watchMode: c.watchMode.rawValue, prTargetBranch: c.prTargetBranch,
+            pipelineFile: c.pipelineFile, workflow: c.workflow, buildCommand: c.buildCommand,
+            triggerMode: c.triggerMode.rawValue, pollSeconds: c.pollSeconds,
+            webhookPort: c.webhookPort, buildTimeoutSeconds: c.buildTimeoutSeconds,
+            postStatus: c.postStatus,
+            isWatching: r.isWatching, isBuilding: r.isBuilding, state: state)
+    }
+
+    /// Copy the editable fields of a submitted config onto a runner (id and
+    /// working directory stay server-owned).
+    private func apply(_ dto: CompanionPipelineDTO, to runner: PipelineRunner) {
+        var c = runner.config
+        c.name = dto.name
+        c.provider = GitProviderKind(rawValue: dto.provider) ?? c.provider
+        c.workspace = dto.workspace
+        c.repoSlug = dto.repoSlug
+        c.branch = dto.branch
+        c.watchMode = WatchMode(rawValue: dto.watchMode) ?? c.watchMode
+        c.prTargetBranch = dto.prTargetBranch
+        c.pipelineFile = dto.pipelineFile
+        c.workflow = dto.workflow
+        c.buildCommand = dto.buildCommand
+        c.triggerMode = TriggerMode(rawValue: dto.triggerMode) ?? c.triggerMode
+        c.pollSeconds = max(5, dto.pollSeconds)
+        c.webhookPort = dto.webhookPort
+        c.buildTimeoutSeconds = max(0, dto.buildTimeoutSeconds)
+        c.postStatus = dto.postStatus
+        runner.config = c
     }
 
     // MARK: Helpers
@@ -103,10 +203,18 @@ public final class CompanionData {
         return (runner, part)
     }
 
-    /// Best-effort current step from the last "▸ …" marker in the live log.
+    /// Best-effort current step from the last step/command marker in the live
+    /// log — the same markers parseLogSections keys off.
     private func currentStep(_ r: PipelineRunner) -> String? {
-        for line in r.log.reversed() where line.text.hasPrefix("▸") {
-            return line.text.dropFirst().trimmingCharacters(in: .whitespaces)
+        for line in r.log.reversed() {
+            let t = line.text
+            if let range = t.range(of: "--- Step: ") {
+                return t[range.upperBound...].replacingOccurrences(of: "---", with: "")
+                    .trimmingCharacters(in: .whitespaces)
+            }
+            if t.hasPrefix("$ ") {
+                return String(t.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+            }
         }
         return nil
     }

@@ -18,12 +18,24 @@ public final class CompanionService {
                 runnerName: String,
                 port: UInt16,
                 store: PairingStore,
+                pool: PipelinePool? = nil,
                 screen: ScreenBroadcaster? = nil,
                 control: (@Sendable (ControlEvent) -> Void)? = nil,
                 apps: (@Sendable () -> CompanionAppsDTO)? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.store = store
-        let data = CompanionData(runners: runners, runnerName: runnerName)
+        let data = CompanionData(runners: runners, runnerName: runnerName, pool: pool)
+
+        // Pipeline management is offered only when a pool is supplied (the app);
+        // a headless CLI running from a fixed config file stays read-only.
+        let ops: CompanionServer.PipelineOps? = pool == nil ? nil : CompanionServer.PipelineOps(
+            list: { await data.pipelines() },
+            create: { await data.createPipeline($0) },
+            update: { await data.updatePipeline(id: $0, $1) },
+            remove: { await data.deletePipeline(id: $0) },
+            watch: { await data.setWatching(id: $0, on: $1) },
+            run: { await data.runPipeline(id: $0) })
+
         self.server = CompanionServer(
             port: port,
             authorize: { store.authorize($0) },
@@ -38,6 +50,7 @@ public final class CompanionService {
                 guard let act = CompanionData.BuildAction(rawValue: action) else { return false }
                 return await data.perform(act, buildID: id)
             },
+            pipelineOps: ops,
             screen: screen,
             control: control,
             apps: apps,
