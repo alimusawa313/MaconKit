@@ -15,33 +15,47 @@ macon init          # verify the toolchain first
 
 ```
 macon version                     print the installed version
-macon init [--check]              check the iOS toolchain; install missing tools
+macon doctor | init [--check]     check toolchain, permissions, cloudflared, disk (--json)
 macon sims <list|install|create>  list / install simulator runtimes (all Apple platforms)
 macon lint [path]                 parse & summarize a macon.yml
+macon validate [path]             validate a macon.yml or a macon-export.json
+macon config <init|validate>      scaffold / check the portable config
 macon pipelines [file.json]       list pipelines in an app export file
 macon run [options] [path]        run one workflow once, here
 macon watch [options]             watch a repo and build new commits (until Ctrl-C)
 macon watch --config file.json    watch pipelines exported from the app
 macon service <install|…>         run a watch as a launchd service
+macon install-service […]         alias for `service install`
 macon companion <devices|…>       manage companion-app (iPhone/iPad) pairings
-macon help                        show usage
+macon completions <zsh|bash>      print shell completions
+
+Remote control — talks to a running runner (the app's, or `watch --companion`):
+macon status [--host H] [--json]  pipelines + builds on the runner
+macon logs [pipeline] [--follow]  print or tail a build's log
+macon trigger <pipeline> [--follow]   build the current head now
+macon cancel [pipeline|build]     stop a running build
+macon pair --host H --code C      pair this CLI with a remote runner
+macon metrics                     print the runner's Prometheus metrics
 ```
 
 ---
 
-## `macon init` — toolchain doctor
+## `macon doctor` / `macon init` — health check
 
-Check that everything an iOS build needs is present; auto-install the
+Check that everything a runner needs is present; `init` also auto-installs the
 Homebrew-managed ones.
 
 ```sh
-macon init            # check + install missing (fastlane, SwiftLint, gitleaks, JDK, cloudflared)
-macon init --check    # report only, install nothing
+macon doctor            # report everything (same as init --check)
+macon init              # check + install missing (fastlane, SwiftLint, gitleaks, JDK, cloudflared)
+macon doctor --json     # machine-readable; exits non-zero when something's missing
 ```
 
 Checks: Homebrew · Xcode + Command Line Tools · git · Ruby/Bundler · fastlane ·
-SwiftLint · gitleaks · JDK · iOS simulators · cloudflared. It also lists your
-installed iOS runtimes and device-type count.
+SwiftLint · gitleaks · JDK · cloudflared · simulators · **disk space** (warns
+under 20 GB free — DerivedData eats it) · **TCC permissions** for the current
+process (Screen Recording / Accessibility — only needed if this terminal serves
+screen/control on a headless Mac; the desktop app holds its own grants).
 
 ---
 
@@ -191,6 +205,94 @@ macon service uninstall [--label NAME]    # stop and remove
 install time (`BITBUCKET_*`, `GITHUB_TOKEN`, `ASC_*`, `SLACK_URL`,
 `MACON_WEBHOOK_SECRET`) are copied into the LaunchAgent so the service can build.
 
+`macon install-service …` is an alias for `macon service install …` — the
+one-liner for a headless runner (e.g. an EC2 Mac):
+
+```sh
+macon install-service --config macon-export.json --companion
+```
+
+---
+
+## Remote control — `status` · `logs` · `trigger` · `cancel`
+
+Drive a **running** runner from the terminal — the desktop app's companion
+server, or a headless `macon watch --companion` (local or remote).
+
+```sh
+macon status                       # pipelines + builds (add --json for scripts)
+macon logs                         # log of the live (or newest) build
+macon logs "My App" --follow       # tail until it finishes; exit 0/1 by result
+macon trigger "My App"             # build the current head now
+macon trigger "My App" --follow    # …and wait for the verdict (CI gate)
+macon cancel                       # stop whatever is running
+```
+
+| Flag | Meaning |
+|---|---|
+| `--host H[:P]` | target runner (default `localhost`); a tunnel domain works (HTTPS auto) |
+| `--port P` | local port when `--host` is omitted (default `8899`) |
+| `--token T` | bearer token (or env `MACON_TOKEN`) |
+| `--json` | machine-readable output (`status`) |
+| `--follow` | tail the build; exit `0` passed / `1` failed |
+
+**Auth** is the same device token a paired iPhone uses:
+
+- **Local runner** — nothing to do. The CLI pairs itself through the shared
+  on-disk pairing store the first time and keeps the token in your Keychain.
+- **Remote runner** (tunnel, EC2 Mac) — pair once with the code the runner
+  prints (or the app shows under *Pair a device*):
+
+```sh
+macon pair --host name.trycloudflare.com --code K7QP-2M9X-4RTD
+macon status --host name.trycloudflare.com
+```
+
+Pipelines are matched by name, id, or unique prefix — `macon trigger my` works
+if only one pipeline starts with "my". Against a headless runner the config is
+fixed: `status`/`logs`/`trigger`/`cancel` all work, but add/edit/delete of
+pipelines needs the desktop app.
+
+---
+
+## `macon metrics` — Prometheus
+
+Every runner serves **`GET /metrics`** (Prometheus text, same bearer auth):
+gauges for pipelines/watching/building, per-pipeline build totals by result,
+and last-build duration. `macon metrics` prints it; scrapers authenticate with
+the device token:
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: macon
+    static_configs: [{ targets: ["mac-mini.local:8899"] }]
+    authorization: { credentials: "<device token>" }
+```
+
+---
+
+## `macon config` — portable config tooling
+
+```sh
+macon config init                   # write a starter macon-export.json
+macon config validate [path]        # field checks; exit 1 on errors (--json)
+macon validate <path>               # routes by extension: .json → export, else macon.yml
+```
+
+`validate` catches empty workspace/repo/branch, duplicate webhook ports,
+missing provider credentials, and secrets that are in neither the file nor the
+env — warnings for the soft stuff, errors (exit 1) for what would break a watch.
+
+---
+
+## `macon completions` — shell completions
+
+```sh
+macon completions zsh  > $(brew --prefix)/share/zsh/site-functions/_macon
+macon completions bash > $(brew --prefix)/etc/bash_completion.d/macon
+```
+
 ---
 
 ## `macon companion` — iPhone/iPad app
@@ -249,8 +351,10 @@ macon companion revoke-all          # revoke every device
 > — the app captures with ScreenCaptureKit and hardware-encodes H.264 (VideoToolbox)
 > at up to 60–120 fps. A paired device can also **control** the Mac (cursor +
 > keyboard) when *Let paired devices control this Mac* is on and Accessibility is
-> granted. Both are app features; `macon watch --companion` from the CLI serves
-> builds + logs only (a headless runner has no display to capture or drive).
+> granted. Both are app features. `macon watch --companion` from the CLI serves
+> builds, live logs, and pipeline status — the companion (and `macon status`
+> from another machine) can watch/run its pipelines, but the config itself is
+> fixed, and a headless runner has no display to capture or drive.
 
 ---
 
@@ -322,9 +426,17 @@ macon run --workflow beta ~/src/planpal
 
 # watch main AND serve the iPhone/iPad companion app
 macon watch --workspace acme --repo app --branch main --companion
+
+# kick a build from anywhere and gate on the result (e.g. inside another CI)
+macon trigger "My App" --host runner.example.com --follow
+
+# scriptable status
+macon status --json | jq '.builds[0].status'
 ```
 
 ## Exit codes
 
-`macon run` exits with the build's status (`0` = passed, non-zero = failed), so
-it composes with other tools. `watch` runs until interrupted.
+`macon run` exits with the build's status (`0` = passed, non-zero = failed).
+`macon logs --follow` and `macon trigger --follow` exit `0`/`1` by the build's
+result. `macon doctor --json` and `macon config validate` exit non-zero when
+something's wrong. `watch` runs until interrupted.

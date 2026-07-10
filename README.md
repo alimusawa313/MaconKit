@@ -7,10 +7,14 @@ the CLI both build on `MaconKit`, so a pipeline runs identically in either.
 
 ```
 macon version
-macon init [--check]              # check the iOS toolchain, install what's missing
+macon doctor | init [--check]     # check toolchain, permissions, cloudflared, disk
 macon lint [path]                 # parse & summarize a macon.yml
 macon run [--workflow N] [--branch B] [--file macon.yml] [path]
 macon watch --workspace WS --repo SLUG [--branch B | --prs] [options]
+macon status | logs | trigger | cancel | metrics    # remote-control a running runner
+macon config <init|validate>      # scaffold / check the portable config
+macon install-service […]         # run a watch as a launchd service
+macon completions <zsh|bash>      # shell completions
 ```
 
 See **[CLI.md](CLI.md)** for the full command reference (every flag, auth, trigger
