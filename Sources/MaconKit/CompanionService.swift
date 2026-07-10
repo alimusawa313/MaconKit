@@ -34,6 +34,10 @@ public final class CompanionService {
             builds: { await data.builds() },
             build: { await data.build(id: $0) },
             logsSince: { await data.linesSince(buildID: $0, afterSeq: $1) },
+            buildAction: { id, action in
+                guard let act = CompanionData.BuildAction(rawValue: action) else { return false }
+                return await data.perform(act, buildID: id)
+            },
             screen: screen,
             control: control,
             apps: apps,

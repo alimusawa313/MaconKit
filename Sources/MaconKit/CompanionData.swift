@@ -57,6 +57,25 @@ public final class CompanionData {
         builds().builds.first { $0.id == id }
     }
 
+    /// Actions a paired device can take on a build.
+    public enum BuildAction: String, Sendable { case cancel, rerun }
+
+    /// Run a build action. `rerun` triggers a fresh run of the build's pipeline;
+    /// `cancel` stops it if it's the one currently building. Returns false if the
+    /// build can't be resolved or the action doesn't apply.
+    @discardableResult
+    public func perform(_ action: BuildAction, buildID: String) -> Bool {
+        guard let (runner, _) = resolve(buildID) else { return false }
+        switch action {
+        case .cancel:
+            guard runner.isBuilding else { return false }
+            runner.cancelBuild()
+        case .rerun:
+            runner.runNow()
+        }
+        return true
+    }
+
     /// Log lines for a build with `seq > afterSeq`, oldest first.
     public func linesSince(buildID: String, afterSeq: Int) async -> [CompanionLogDTO] {
         guard let (runner, part) = resolve(buildID) else { return [] }

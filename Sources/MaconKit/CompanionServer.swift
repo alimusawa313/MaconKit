@@ -8,6 +8,8 @@
 //    POST /pair                 (no auth)  device-code → token
 //    GET  /builds               (Bearer)   build list
 //    GET  /builds/{id}          (Bearer)   one build
+//    POST /builds/{id}/rerun    (Bearer)   trigger a fresh run of its pipeline
+//    POST /builds/{id}/cancel   (Bearer)   stop it if it's building
 //    WS   /builds/{id}/logs     (Bearer)   live log tail
 //
 //  Meant to sit behind a cloudflared tunnel (which terminates TLS), so a
@@ -25,6 +27,8 @@ public final class CompanionServer: @unchecked Sendable {
     public typealias Builds = @Sendable () async -> CompanionBuildsDTO
     public typealias Build = @Sendable (_ id: String) async -> CompanionBuildDTO?
     public typealias LogsSince = @Sendable (_ id: String, _ afterSeq: Int) async -> [CompanionLogDTO]
+    /// Run a build action ("rerun" | "cancel"); returns whether it applied.
+    public typealias BuildActionFn = @Sendable (_ id: String, _ action: String) async -> Bool
 
     private let port: NWEndpoint.Port
     private let queue = DispatchQueue(label: "macon.companion")
@@ -35,6 +39,7 @@ public final class CompanionServer: @unchecked Sendable {
     private let builds: Builds
     private let build: Build
     private let logsSince: LogsSince
+    private let buildAction: BuildActionFn?
     private let onLog: @Sendable (String) -> Void
 
     /// Optional H.264 screen streaming. Nil disables the /screen route (e.g. the
@@ -54,6 +59,7 @@ public final class CompanionServer: @unchecked Sendable {
                 builds: @escaping Builds,
                 build: @escaping Build,
                 logsSince: @escaping LogsSince,
+                buildAction: BuildActionFn? = nil,
                 screen: ScreenBroadcaster? = nil,
                 control: (@Sendable (ControlEvent) -> Void)? = nil,
                 apps: (@Sendable () -> CompanionAppsDTO)? = nil,
@@ -64,6 +70,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.builds = builds
         self.build = build
         self.logsSince = logsSince
+        self.buildAction = buildAction
         self.screen = screen
         self.control = control
         self.apps = apps
@@ -193,6 +200,18 @@ public final class CompanionServer: @unchecked Sendable {
             Task {
                 guard let b = await self.build(segs[1]) else { self.respond(conn, "404 Not Found", json: nil); return }
                 self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(b))
+            }
+            return
+        }
+
+        // POST /builds/{id}/rerun | /builds/{id}/cancel
+        if method == "POST", segs.count == 3, segs[0] == "builds",
+           segs[2] == "rerun" || segs[2] == "cancel" {
+            guard let buildAction else { respond(conn, "404 Not Found", json: nil); return }
+            let id = segs[1], act = segs[2]
+            Task {
+                let ok = await buildAction(id, act)
+                self.respond(conn, ok ? "200 OK" : "409 Conflict", json: nil)
             }
             return
         }
