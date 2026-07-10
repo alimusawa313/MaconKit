@@ -26,9 +26,10 @@ public final class CompanionService {
         self.store = store
         let data = CompanionData(runners: runners, runnerName: runnerName, pool: pool)
 
-        // Pipeline management is offered only when a pool is supplied (the app);
-        // a headless CLI running from a fixed config file stays read-only.
-        let ops: CompanionServer.PipelineOps? = pool == nil ? nil : CompanionServer.PipelineOps(
+        // Listing, watch toggles, and run-now work everywhere (they only need the
+        // runners). Add/edit/delete and provider lookups need a PipelinePool, so
+        // they no-op on a headless CLI — the DTO's `managed` flag says which.
+        let ops = CompanionServer.PipelineOps(
             list: { await data.pipelines() },
             create: { await data.createPipeline($0) },
             update: { await data.updatePipeline(id: $0, $1) },
@@ -53,6 +54,7 @@ public final class CompanionService {
                 return await data.perform(act, buildID: id)
             },
             pipelineOps: ops,
+            metrics: { await data.metricsText() },
             screen: screen,
             control: control,
             apps: apps,

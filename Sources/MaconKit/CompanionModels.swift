@@ -47,7 +47,12 @@ public struct CompanionLogDTO: Codable, Sendable {
 /// device can manage them like the Mac app does.
 public struct CompanionPipelinesDTO: Codable, Sendable {
     public var pipelines: [CompanionPipelineDTO]
-    public init(pipelines: [CompanionPipelineDTO]) { self.pipelines = pipelines }
+    /// Whether this server supports add/edit/delete (the app does; a headless
+    /// CLI watching a fixed config is view/run/watch only).
+    public var managed: Bool
+    public init(pipelines: [CompanionPipelineDTO], managed: Bool = true) {
+        self.pipelines = pipelines; self.managed = managed
+    }
 }
 
 /// One pipeline: its editable config plus (server → app) runtime state.

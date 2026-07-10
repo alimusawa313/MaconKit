@@ -13,7 +13,9 @@ import MaconKit
 // file or pipe (nohup/tmux/launchd), not just when attached to a terminal.
 setvbuf(stdout, nil, _IOLBF, 0)
 
-let args = Array(CommandLine.arguments.dropFirst())
+var args = Array(CommandLine.arguments.dropFirst())
+// `macon install-service …` = `macon service install …`
+if args.first == "install-service" { args = ["service", "install"] + args.dropFirst() }
 let command = args.first ?? "help"
 
 func fail(_ msg: String) -> Never { FileHandle.standardError.write(Data((msg + "\n").utf8)); exit(1) }
@@ -205,7 +207,7 @@ case "init", "doctor":
     // Check the toolchain an iOS build needs; install what can be installed via
     // Homebrew. `--check` reports only (no installs).
     let checkOnly = flag("check")
-    print("macon init — checking iOS CI prerequisites\n")
+    if !flag("json") { print("macon \(command) — checking CI prerequisites\n") }
 
     let hasBrew = probe("command -v brew").code == 0
 
@@ -243,24 +245,49 @@ case "init", "doctor":
             install: hasBrew ? "brew install cloudflared" : nil, hint: "brew install cloudflared"),
     ]
 
+    struct DoctorRow: Codable { let name: String; let ok: Bool; let detail: String }
+    var rows: [DoctorRow] = []
     var missing: [Dep] = []
     for d in deps {
         let r = probe(d.probe)
         if r.code == 0 && !r.output.isEmpty {
             let v = r.output.split(separator: "\n").first.map(String.init) ?? ""
-            print("  ✓ \(d.name)  \(v)")
+            rows.append(DoctorRow(name: d.name, ok: true, detail: v))
         } else {
-            print("  ✗ \(d.name) — not found")
+            rows.append(DoctorRow(name: d.name, ok: false, detail: d.hint))
             missing.append(d)
         }
     }
 
     // Simulator runtimes (any Apple platform; needs Xcode).
     let sims = probe("xcrun simctl list runtimes 2>&1 | grep -ci simruntime").output
-    if let n = Int(sims), n > 0 {
-        print("  ✓ Simulators  \(n) runtime(s)")
-    } else {
-        print("  ✗ Simulators — none installed  (macon sims install <platform> [version])")
+    let simCount = Int(sims) ?? 0
+    rows.append(DoctorRow(name: "Simulators", ok: simCount > 0,
+                          detail: simCount > 0 ? "\(simCount) runtime(s)"
+                                               : "none — macon sims install <platform> [version]"))
+
+    // Disk space — CI eats it (DerivedData, simulators, archives).
+    if let disk = diskSpace() {
+        let ok = disk.freeGB >= 20
+        rows.append(DoctorRow(name: "Disk space", ok: ok,
+                              detail: String(format: "%.0f GB free of %.0f GB%@",
+                                             disk.freeGB, disk.totalGB,
+                                             ok ? "" : " — builds need ~20 GB headroom (try `macon`'s app Cleanup or clear DerivedData)")))
+    }
+
+    // TCC permissions for this process (headless serving from the CLI).
+    for t in tccChecks() {
+        rows.append(DoctorRow(name: t.name, ok: t.ok, detail: t.detail))
+    }
+
+    if flag("json") {
+        printJSON(rows)
+        exit(rows.contains { !$0.ok && $0.name != "Screen Recording (this terminal)"
+                                     && $0.name != "Accessibility (this terminal)" } ? 1 : 0)
+    }
+
+    for r in rows {
+        print("  \(r.ok ? "✓" : "✗") \(r.name)\(r.detail.isEmpty ? "" : "  \(r.detail)")")
     }
     showSimulators(full: false)
 
@@ -644,15 +671,243 @@ case "companion":
         """)
     }
 
+case "status":
+    // Builds + pipelines from a running companion server (local by default).
+    do {
+        let builds: CompanionBuildsDTO = try await Remote.getJSON("builds")
+        // /pipelines may 404 on very old servers — degrade to builds only.
+        let pipes: CompanionPipelinesDTO = (try? await Remote.getJSON("pipelines"))
+            ?? CompanionPipelinesDTO(pipelines: [], managed: false)
+        if flag("json") {
+            printJSON(StatusOut(runnerName: builds.runnerName, managed: pipes.managed,
+                                pipelines: pipes.pipelines, builds: builds.builds))
+            exit(0)
+        }
+        print("Runner: \(builds.runnerName)  ·  \(Remote.host)")
+        if !pipes.pipelines.isEmpty {
+            print("\nPipelines\(pipes.managed ? "" : " (read-only server)"):")
+            for p in pipes.pipelines {
+                let state = (p.isBuilding ?? false) ? "building…" : (p.state ?? "idle")
+                let watch = (p.isWatching ?? false) ? "watching" : "stopped"
+                print("  \(statusGlyph(p.state ?? "-")) \(p.name)  \(p.workspace)/\(p.repoSlug) @ \(p.branch)  [\(watch)]  \(state)")
+            }
+        }
+        if builds.builds.isEmpty {
+            print("\nNo builds yet.")
+        } else {
+            print("\nBuilds:")
+            for b in builds.builds.prefix(15) { printBuildRow(b) }
+        }
+    } catch { fail("\(error)") }
+
+case "logs":
+    // macon logs [pipeline-or-build-id] [--follow]
+    do {
+        let builds: CompanionBuildsDTO = try await Remote.getJSON("builds")
+        var buildID: String
+        if let arg = positional {
+            if arg.contains("~") {
+                buildID = arg
+            } else {
+                let pipes: CompanionPipelinesDTO = try await Remote.getJSON("pipelines")
+                guard let p = resolvePipeline(arg, in: pipes.pipelines) else {
+                    fail("No pipeline matches “\(arg)”. See `macon status`.")
+                }
+                guard let b = latestBuild(forPipeline: p.id, in: builds.builds) else {
+                    fail("“\(p.name)” has no builds yet. Trigger one: macon trigger \(p.name)")
+                }
+                buildID = b.id
+            }
+        } else {
+            // No arg → the live build, else the newest one.
+            guard let b = builds.builds.first(where: { $0.status == "running" }) ?? builds.builds.first else {
+                fail("No builds on the runner yet.")
+            }
+            buildID = b.id
+        }
+
+        if flag("follow") {
+            let result = try await followBuild(buildID)
+            print("── build \(result) ──")
+            exit(result == "passed" ? 0 : 1)
+        } else {
+            _ = try await fetchLogs(buildID: buildID, after: -1)
+        }
+    } catch { fail("\(error)") }
+
+case "trigger":
+    // macon trigger <pipeline> [--follow] — build the current head now.
+    do {
+        guard let name = positional else { fail("Usage: macon trigger <pipeline> [--follow] [--host H]") }
+        let pipes: CompanionPipelinesDTO = try await Remote.getJSON("pipelines")
+        guard let p = resolvePipeline(name, in: pipes.pipelines) else {
+            fail("No pipeline matches “\(name)”. See `macon status`.")
+        }
+        let (code, _) = try await Remote.request("pipelines/\(p.id)/run", method: "POST")
+        guard code == 200 else { fail(Remote.httpHint(code)) }
+        print("▶ Triggered \(p.name).")
+        if flag("follow") {
+            try? await Task.sleep(for: .seconds(2))     // let the run spin up
+            let result = try await followBuild("\(p.id)~live")
+            print("── build \(result) ──")
+            exit(result == "passed" ? 0 : 1)
+        }
+    } catch { fail("\(error)") }
+
+case "cancel":
+    // macon cancel [pipeline-or-build-id] — stop a running build.
+    do {
+        let builds: CompanionBuildsDTO = try await Remote.getJSON("builds")
+        var target: CompanionBuildDTO?
+        if let arg = positional {
+            if arg.contains("~") {
+                target = builds.builds.first { $0.id == arg }
+            } else {
+                let pipes: CompanionPipelinesDTO = try await Remote.getJSON("pipelines")
+                if let p = resolvePipeline(arg, in: pipes.pipelines) {
+                    target = builds.builds.first { $0.id.hasPrefix("\(p.id)~") && $0.status == "running" }
+                }
+            }
+        } else {
+            target = builds.builds.first { $0.status == "running" }
+        }
+        guard let build = target else { fail("Nothing running to cancel.") }
+        let (code, _) = try await Remote.request("builds/\(build.id)/cancel", method: "POST")
+        guard code == 200 else { fail(Remote.httpHint(code)) }
+        print("⏹ Cancelling \(build.repo) @ \(build.commit).")
+    } catch { fail("\(error)") }
+
+case "metrics":
+    // Print the server's Prometheus exposition (same text a scraper gets).
+    do {
+        let (code, data) = try await Remote.request("metrics")
+        guard code == 200 else { fail(Remote.httpHint(code)) }
+        print(String(data: data, encoding: .utf8) ?? "")
+    } catch { fail("\(error)") }
+
+case "pair":
+    // macon pair --host H --code C — pair this CLI with a remote runner.
+    do {
+        guard option("host") != nil else {
+            fail("Usage: macon pair --host <host[:port] | tunnel-domain> --code <CODE>\n(local runners pair automatically — no need for `macon pair`)")
+        }
+        guard let code = option("code") else {
+            fail("Need --code — mint one on the Mac (Settings → Companion → Pair a device) or from `macon watch --companion`.")
+        }
+        let body = try JSONEncoder().encode(["code": code, "device_name": "macon CLI @ \(ProcessInfo.processInfo.hostName)"])
+        let (status, data) = try await Remote.request("pair", method: "POST", body: body, authed: false)
+        guard status == 200,
+              let resp = try? CompanionJSON.decoder.decode(CompanionPairResponseDTO.self, from: data) else {
+            fail(status == 401 ? "Pairing code rejected or expired." : Remote.httpHint(status))
+        }
+        Remote.storeToken(resp.token)
+        print("✓ Paired with \(resp.runnerName) at \(Remote.host). Token stored in the Keychain.")
+        print("  Try: macon status --host \(Remote.host)")
+    } catch { fail("\(error)") }
+
+case "completions":
+    switch args.count > 1 ? args[1] : "" {
+    case "zsh":  print(zshCompletion)
+    case "bash": print(bashCompletion)
+    default: fail("""
+        Usage: macon completions <zsh|bash>
+          zsh:  macon completions zsh  > $(brew --prefix)/share/zsh/site-functions/_macon
+          bash: macon completions bash > $(brew --prefix)/etc/bash_completion.d/macon
+        """)
+    }
+
+case "config":
+    // Portable-config helpers: scaffold and validate macon-export.json.
+    let sub = args.count > 1 && !args[1].hasPrefix("--") ? args[1] : ""
+    switch sub {
+    case "init":
+        let path = (args.count > 2 && !args[2].hasPrefix("--")) ? args[2] : "macon-export.json"
+        guard !FileManager.default.fileExists(atPath: path) || flag("force") else {
+            fail("\(path) already exists — pass --force to overwrite.")
+        }
+        guard let data = try? configTemplate().encoded() else { fail("Couldn't encode the template.") }
+        do { try data.write(to: URL(fileURLWithPath: path)) }
+        catch { fail("Couldn't write \(path): \(error.localizedDescription)") }
+        print("""
+        ✓ Wrote \(path) — a starter config with one pipeline.
+          1. Edit the workspace/repo/branch and build command.
+          2. Check it:   macon config validate \(path)
+          3. Run it:     macon watch --config \(path)
+        Credentials come from the env (GITHUB_TOKEN / BITBUCKET_EMAIL+BITBUCKET_API_TOKEN)
+        unless the file embeds them (app export “with secrets”).
+        """)
+
+    case "validate":
+        let path = (args.count > 2 && !args[2].hasPrefix("--")) ? args[2] : "macon-export.json"
+        guard let data = FileManager.default.contents(atPath: path) else { fail("No file at \(path).") }
+        let bundle: MaconExport
+        do { bundle = try MaconExport.decoded(from: data) }
+        catch { fail("\(path) doesn't parse as a macon export: \(error.localizedDescription)") }
+        let issues = validateExport(bundle)
+        if flag("json") {
+            printJSON(issues)
+        } else {
+            print("\(path) — \(bundle.pipelines.count) pipeline(s)"
+                  + (bundle.includesSecrets ? ", includes secrets" : ", config only"))
+            for i in issues { print("  \(i.level == "error" ? "✗" : "⚠︎") [\(i.pipeline)] \(i.message)") }
+            if issues.isEmpty { print("  ✓ No problems found.") }
+        }
+        exit(issues.contains { $0.level == "error" } ? 1 : 0)
+
+    default:
+        fail("Usage: macon config <init [path] [--force] | validate [path] [--json]>")
+    }
+
+case "validate":
+    // Convenience: validate whatever the path is — export JSON or macon.yml.
+    let path = positional ?? "macon.yml"
+    if path.hasSuffix(".json") {
+        guard let data = FileManager.default.contents(atPath: path) else { fail("No file at \(path).") }
+        let bundle: MaconExport
+        do { bundle = try MaconExport.decoded(from: data) }
+        catch { fail("\(path) doesn't parse as a macon export: \(error.localizedDescription)") }
+        let issues = validateExport(bundle)
+        if flag("json") { printJSON(issues) }
+        else {
+            for i in issues { print("  \(i.level == "error" ? "✗" : "⚠︎") [\(i.pipeline)] \(i.message)") }
+            if issues.isEmpty { print("✓ \(path) — no problems found.") }
+        }
+        exit(issues.contains { $0.level == "error" } ? 1 : 0)
+    } else {
+        guard let pipeline = MaconPipelineLoader.load(atPath: path) else {
+            fail("Could not load or parse \(path) (needs Ruby for YAML→JSON).")
+        }
+        print("✓ \(path) — \(pipeline.name ?? "unnamed") parses fine.")
+        exit(0)
+    }
+
 case "help", "--help", "-h":
     print("""
     macon — local CI runner (MaconKit)
+
+    Remote control (talks to a running server — the app's, or `watch --companion`):
+      status [--host H] [--json]   pipelines + builds on the runner
+      logs [pipeline|build] [--follow]
+                                   print (or tail) a build's log; --follow exits 0/1 by result
+      trigger <pipeline> [--follow]
+                                   build the current head now
+      cancel [pipeline|build]      stop a running build
+      pair --host H --code C       pair this CLI with a remote runner (local pairs itself)
+      metrics                      print the server's Prometheus exposition (GET /metrics)
+      Common flags: --host H[:P] · --port P · --token T (or MACON_TOKEN) · --json
+
     Commands:
       version                      print version
-      init [--check]               check the iOS toolchain (Xcode, fastlane, sims…) & install missing
+      doctor | init [--check] [--json]
+                                   check toolchain, TCC permissions, cloudflared, disk space
+                                   (init also installs the Homebrew-able ones)
       sims <list|install [platform] [version]|create "<device>" <version> [platform]>
                                    list / install simulator runtimes (iOS, watchOS, tvOS, visionOS)
       lint [path]                  parse and summarize a macon.yml
+      validate [path]              validate a macon.yml or a macon-export.json
+      config <init [path]|validate [path] [--json]>
+                                   scaffold / check the portable config
+      completions <zsh|bash>       print shell completions
       pipelines [file.json]        list pipelines in an app export file
       run [--workflow N] [--branch B] [--file macon.yml] [path]
                                    run a workflow once in the given repo dir
@@ -683,6 +938,8 @@ case "help", "--help", "-h":
                                    manage paired companion devices
       service <install|uninstall|status> [watch args…] [--label NAME]
                                    run a watch as a launchd service (starts at login, restarts on crash)
+      install-service [\u{2026}]         alias for `service install` — headless runners (e.g. an EC2 Mac):
+                                   macon install-service --config macon-export.json --companion
     """)
 
 default:

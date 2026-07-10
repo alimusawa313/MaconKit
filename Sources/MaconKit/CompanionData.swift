@@ -102,7 +102,60 @@ public final class CompanionData {
 
     /// The configured pipelines with their live state.
     public func pipelines() -> CompanionPipelinesDTO {
-        CompanionPipelinesDTO(pipelines: runnersProvider().map { dto($0) })
+        CompanionPipelinesDTO(pipelines: runnersProvider().map { dto($0) },
+                              managed: pool != nil)
+    }
+
+    /// Prometheus text exposition for `GET /metrics`.
+    public func metricsText() -> String {
+        let runners = runnersProvider()
+        var out = """
+        # HELP macon_up 1 while the runner is serving.
+        # TYPE macon_up gauge
+        macon_up 1
+        # HELP macon_pipelines_total Configured pipelines.
+        # TYPE macon_pipelines_total gauge
+        macon_pipelines_total \(runners.count)
+        # HELP macon_pipelines_watching Pipelines with an active watcher.
+        # TYPE macon_pipelines_watching gauge
+        macon_pipelines_watching \(runners.filter(\.isWatching).count)
+        # HELP macon_builds_running Builds in progress right now.
+        # TYPE macon_builds_running gauge
+        macon_builds_running \(runners.filter(\.isBuilding).count)
+
+        """
+        out += """
+        # HELP macon_pipeline_watching Whether this pipeline's watcher is running.
+        # TYPE macon_pipeline_watching gauge
+        # HELP macon_pipeline_building Whether this pipeline is building.
+        # TYPE macon_pipeline_building gauge
+        # HELP macon_builds_total Finished builds by result (persisted history).
+        # TYPE macon_builds_total counter
+        # HELP macon_build_duration_seconds Duration of the most recent finished build.
+        # TYPE macon_build_duration_seconds gauge
+
+        """
+        for r in runners {
+            let label = Self.promEscape(r.config.name)
+            out += "macon_pipeline_watching{pipeline=\"\(label)\"} \(r.isWatching ? 1 : 0)\n"
+            out += "macon_pipeline_building{pipeline=\"\(label)\"} \(r.isBuilding ? 1 : 0)\n"
+            var counts: [String: Int] = [:]
+            for run in r.history { counts[CompanionJSON.status(run.result), default: 0] += 1 }
+            for (result, n) in counts.sorted(by: { $0.key < $1.key }) {
+                out += "macon_builds_total{pipeline=\"\(label)\",result=\"\(result)\"} \(n)\n"
+            }
+            if let last = r.history.first {
+                out += "macon_build_duration_seconds{pipeline=\"\(label)\"} "
+                     + String(format: "%.1f", last.duration) + "\n"
+            }
+        }
+        return out
+    }
+
+    private static func promEscape(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\", with: "\\\\")
+         .replacingOccurrences(of: "\"", with: "\\\"")
+         .replacingOccurrences(of: "\n", with: " ")
     }
 
     /// Create a pipeline from a submitted config. Fails without a pool.

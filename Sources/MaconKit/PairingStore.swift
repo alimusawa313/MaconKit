@@ -26,6 +26,10 @@ public final class PairingStore: @unchecked Sendable {
     private let lock = NSLock()
     private var pending: (code: String, expires: Date)?
     private var devices: [Device]
+    /// Modification date of devices.json when we last loaded it, so a change
+    /// made by another process (e.g. `macon pair` / `macon companion revoke`
+    /// while the app's server is running) is picked up on the next authorize.
+    private var loadedAt: Date?
 
     private let fileURL: URL
 
@@ -34,16 +38,12 @@ public final class PairingStore: @unchecked Sendable {
         let dir = base.appendingPathComponent("MacON/companion", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         fileURL = dir.appendingPathComponent("devices.json")
-        if let data = try? Data(contentsOf: fileURL),
-           let list = try? JSONDecoder().decode([Device].self, from: data) {
-            devices = list
-        } else {
-            devices = []
-        }
+        devices = []
+        reloadLocked()
     }
 
-    public var deviceCount: Int { lock.withLock { devices.count } }
-    public func deviceList() -> [Device] { lock.withLock { devices } }
+    public var deviceCount: Int { lock.withLock { reloadIfChanged(); return devices.count } }
+    public func deviceList() -> [Device] { lock.withLock { reloadIfChanged(); return devices } }
 
     // MARK: Pairing
 
@@ -69,15 +69,20 @@ public final class PairingStore: @unchecked Sendable {
         }
     }
 
-    /// Is this bearer token one we issued?
+    /// Is this bearer token one we issued? Reloads from disk first if another
+    /// process changed the file, so pair/revoke work across processes.
     public func authorize(_ token: String) -> Bool {
-        lock.withLock { devices.contains { Self.constantTimeEqual($0.token, token) } }
+        lock.withLock {
+            reloadIfChanged()
+            return devices.contains { Self.constantTimeEqual($0.token, token) }
+        }
     }
 
     /// Remove devices whose token starts with `prefix`. Returns how many.
     @discardableResult
     public func revoke(prefix: String) -> Int {
         lock.withLock {
+            reloadIfChanged()
             let before = devices.count
             devices.removeAll { $0.token.hasPrefix(prefix) }
             persist()
@@ -94,6 +99,26 @@ public final class PairingStore: @unchecked Sendable {
     /// Caller must hold `lock`.
     private func persist() {
         if let data = try? JSONEncoder().encode(devices) { try? data.write(to: fileURL) }
+        loadedAt = fileModDate()
+    }
+
+    /// Caller must hold `lock`. Re-read devices.json if its mtime moved.
+    private func reloadIfChanged() {
+        guard fileModDate() != loadedAt else { return }
+        reloadLocked()
+    }
+
+    /// Caller must hold `lock` (or be in init).
+    private func reloadLocked() {
+        if let data = try? Data(contentsOf: fileURL),
+           let list = try? JSONDecoder().decode([Device].self, from: data) {
+            devices = list
+        }
+        loadedAt = fileModDate()
+    }
+
+    private func fileModDate() -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: fileURL.path))?[.modificationDate] as? Date
     }
 
     /// Crockford-ish base32 (no ambiguous chars), grouped: `K7QP-2M9X-4RTD`.

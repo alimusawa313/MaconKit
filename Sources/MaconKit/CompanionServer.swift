@@ -11,6 +11,8 @@
 //    POST /builds/{id}/rerun    (Bearer)   trigger a fresh run of its pipeline
 //    POST /builds/{id}/cancel   (Bearer)   stop it if it's building
 //    WS   /builds/{id}/logs     (Bearer)   live log tail
+//    GET  /builds/{id}/logs?after=N (Bearer)  log lines as JSON (for the CLI)
+//    GET  /metrics              (Bearer)   Prometheus text exposition
 //    GET  /pipelines            (Bearer)   configured pipelines + live state
 //    POST /pipelines            (Bearer)   create a pipeline
 //    PUT  /pipelines/{id}       (Bearer)   update a pipeline's config
@@ -73,6 +75,8 @@ public final class CompanionServer: @unchecked Sendable {
     private let logsSince: LogsSince
     private let buildAction: BuildActionFn?
     private let pipelineOps: PipelineOps?
+    /// Prometheus text for GET /metrics (nil disables the route).
+    private let metrics: (@Sendable () async -> String)?
     private let onLog: @Sendable (String) -> Void
 
     /// Optional H.264 screen streaming. Nil disables the /screen route (e.g. the
@@ -94,6 +98,7 @@ public final class CompanionServer: @unchecked Sendable {
                 logsSince: @escaping LogsSince,
                 buildAction: BuildActionFn? = nil,
                 pipelineOps: PipelineOps? = nil,
+                metrics: (@Sendable () async -> String)? = nil,
                 screen: ScreenBroadcaster? = nil,
                 control: (@Sendable (ControlEvent) -> Void)? = nil,
                 apps: (@Sendable () -> CompanionAppsDTO)? = nil,
@@ -106,6 +111,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.logsSince = logsSince
         self.buildAction = buildAction
         self.pipelineOps = pipelineOps
+        self.metrics = metrics
         self.screen = screen
         self.control = control
         self.apps = apps
@@ -208,6 +214,25 @@ public final class CompanionServer: @unchecked Sendable {
         if method == "GET", segs.count == 3, segs[0] == "builds", segs[2] == "logs",
            headerValue(header, "upgrade")?.lowercased() == "websocket" {
             upgradeAndStream(conn, header: header, buildID: segs[1]); return
+        }
+
+        // GET /builds/{id}/logs?after=N — plain JSON, for the CLI (no WS client).
+        if method == "GET", segs.count == 3, segs[0] == "builds", segs[2] == "logs" {
+            let id = segs[1]
+            let after = Int(query["after"] ?? "") ?? -1
+            Task {
+                let lines = await self.logsSince(id, after)
+                self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(lines))
+            }
+            return
+        }
+
+        // GET /metrics — Prometheus text exposition (Bearer-authed; point your
+        // scraper at it with `authorization: credentials: <device token>`).
+        if method == "GET", path == "/metrics" {
+            guard let metrics else { respond(conn, "404 Not Found", json: nil); return }
+            Task { self.respondText(conn, "200 OK", text: await metrics()) }
+            return
         }
 
         // WS /screen — live H.264 screen stream (only if a source is wired up)
@@ -334,6 +359,18 @@ public final class CompanionServer: @unchecked Sendable {
     }
 
     // MARK: Plain HTTP response (closes the connection)
+
+    /// text/plain response — Prometheus and friends.
+    private func respondText(_ conn: NWConnection, _ status: String, text: String) {
+        let payload = Data(text.utf8)
+        var head = "HTTP/1.1 \(status)\r\n"
+        head += "Content-Type: text/plain; version=0.0.4; charset=utf-8\r\n"
+        head += "Content-Length: \(payload.count)\r\n"
+        head += "Connection: close\r\n\r\n"
+        conn.send(content: Data(head.utf8) + payload, completion: .contentProcessed { _ in
+            conn.cancel()
+        })
+    }
 
     private func respond(_ conn: NWConnection, _ status: String, json: Data?) {
         let payload = json ?? Data("{}".utf8)
