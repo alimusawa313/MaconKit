@@ -22,6 +22,9 @@ public final class CompanionService {
                 screen: ScreenBroadcaster? = nil,
                 control: (@Sendable (ControlEvent) -> Void)? = nil,
                 apps: (@Sendable () -> CompanionAppsDTO)? = nil,
+                windows: (@Sendable () async -> CompanionWindowsDTO)? = nil,
+                compactOpen: (@Sendable (CompanionCompactOpenRequestDTO) async -> CompanionCompactOpenResponseDTO?)? = nil,
+                screenTarget: (@Sendable (UInt32?) -> Void)? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.store = store
         let data = CompanionData(runners: runners, runnerName: runnerName, pool: pool)
@@ -58,6 +61,9 @@ public final class CompanionService {
             screen: screen,
             control: control,
             apps: apps,
+            windows: windows,
+            compactOpen: compactOpen,
+            screenTarget: screenTarget,
             onLog: onLog)
     }
 

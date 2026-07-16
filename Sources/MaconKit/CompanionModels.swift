@@ -134,6 +134,53 @@ public enum InstalledApps {
     }
 }
 
+// MARK: - CompactOS (single-window streaming)
+
+/// `GET /windows` response — the Mac's open windows, for the CompactOS picker.
+public struct CompanionWindowsDTO: Codable, Sendable {
+    public var windows: [CompanionWindowDTO]
+    public init(windows: [CompanionWindowDTO]) { self.windows = windows }
+}
+
+/// One open Mac window.
+public struct CompanionWindowDTO: Codable, Sendable {
+    public var id: UInt32            // CGWindowID
+    public var app: String           // owning app's name
+    public var appPath: String?      // owning app's bundle path (icon lookup)
+    public var title: String?
+    public var width: Int            // points
+    public var height: Int
+    public var isOnScreen: Bool      // false = minimized or on another Space
+    public init(id: UInt32, app: String, appPath: String?, title: String?,
+                width: Int, height: Int, isOnScreen: Bool) {
+        self.id = id; self.app = app; self.appPath = appPath; self.title = title
+        self.width = width; self.height = height; self.isOnScreen = isOnScreen
+    }
+}
+
+/// `POST /compact/open` request — launch/focus an app (or a specific window)
+/// and fit its window to the device's screen so the stream maps ~1:1.
+public struct CompanionCompactOpenRequestDTO: Codable, Sendable {
+    public var appPath: String?      // open/focus this app (its frontmost window)…
+    public var windowId: UInt32?     // …or target a specific window
+    public var width: Int            // requested window size (points)
+    public var height: Int
+    public init(appPath: String?, windowId: UInt32?, width: Int, height: Int) {
+        self.appPath = appPath; self.windowId = windowId
+        self.width = width; self.height = height
+    }
+}
+
+/// `POST /compact/open` response — the window the device should stream.
+public struct CompanionCompactOpenResponseDTO: Codable, Sendable {
+    public var windowId: UInt32
+    public var width: Int            // actual size after the app's min-size clamp
+    public var height: Int
+    public init(windowId: UInt32, width: Int, height: Int) {
+        self.windowId = windowId; self.width = width; self.height = height
+    }
+}
+
 /// A plain list of names (repos, branches) for the app's pickers.
 public struct CompanionListDTO: Codable, Sendable {
     public var values: [String]

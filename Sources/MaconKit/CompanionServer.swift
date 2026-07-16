@@ -18,6 +18,9 @@
 //    PUT  /pipelines/{id}       (Bearer)   update a pipeline's config
 //    DELETE /pipelines/{id}     (Bearer)   remove a pipeline
 //    POST /pipelines/{id}/watch|unwatch|run  (Bearer)  runner controls
+//    GET  /windows              (Bearer)   open Mac windows (CompactOS picker)
+//    POST /compact/open         (Bearer)   open/fit an app window for CompactOS
+//    WS   /screen?window={id}   (Bearer)   stream one window instead of the display
 //
 //  Meant to sit behind a cloudflared tunnel (which terminates TLS), so a
 //  headless EC2 Mac is reachable at a stable https/wss URL.
@@ -87,6 +90,14 @@ public final class CompanionServer: @unchecked Sendable {
     /// Optional installed-app catalog (the app supplies one with icons). Falls
     /// back to a Foundation-only, icon-less enumeration.
     private let apps: (@Sendable () -> CompanionAppsDTO)?
+    /// CompactOS: enumerate the Mac's open windows (nil disables /windows).
+    private let windows: (@Sendable () async -> CompanionWindowsDTO)?
+    /// CompactOS: open/focus an app and fit its window to the device. Returns
+    /// nil when refused (e.g. remote control disabled) → 409.
+    private let compactOpen: (@Sendable (CompanionCompactOpenRequestDTO) async -> CompanionCompactOpenResponseDTO?)?
+    /// CompactOS: point the screen stream at one window (nil = whole display).
+    /// Called on every /screen connect — last viewer wins.
+    private let screenTarget: (@Sendable (UInt32?) -> Void)?
 
     private static let controlDecoder = JSONDecoder()
 
@@ -102,6 +113,9 @@ public final class CompanionServer: @unchecked Sendable {
                 screen: ScreenBroadcaster? = nil,
                 control: (@Sendable (ControlEvent) -> Void)? = nil,
                 apps: (@Sendable () -> CompanionAppsDTO)? = nil,
+                windows: (@Sendable () async -> CompanionWindowsDTO)? = nil,
+                compactOpen: (@Sendable (CompanionCompactOpenRequestDTO) async -> CompanionCompactOpenResponseDTO?)? = nil,
+                screenTarget: (@Sendable (UInt32?) -> Void)? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8899
         self.authorize = authorize
@@ -115,6 +129,9 @@ public final class CompanionServer: @unchecked Sendable {
         self.screen = screen
         self.control = control
         self.apps = apps
+        self.windows = windows
+        self.compactOpen = compactOpen
+        self.screenTarget = screenTarget
         self.onLog = onLog
     }
 
@@ -235,10 +252,13 @@ public final class CompanionServer: @unchecked Sendable {
             return
         }
 
-        // WS /screen — live H.264 screen stream (only if a source is wired up)
+        // WS /screen — live H.264 screen stream (only if a source is wired up).
+        // ?window={id} points the capture at one window (CompactOS); no param
+        // reverts to the whole display. One capture pipeline — last viewer wins.
         if method == "GET", path == "/screen",
            headerValue(header, "upgrade")?.lowercased() == "websocket" {
             guard screen != nil else { respond(conn, "404 Not Found", json: nil); return }
+            screenTarget?(query["window"].flatMap { UInt32($0) })
             upgradeAndStreamScreen(conn, header: header); return
         }
 
@@ -256,6 +276,30 @@ public final class CompanionServer: @unchecked Sendable {
             Task {
                 let dto = provided?() ?? CompanionAppsDTO(apps: InstalledApps.list())
                 self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(dto))
+            }
+            return
+        }
+
+        // GET /windows — the Mac's open windows, for the CompactOS picker.
+        if method == "GET", path == "/windows" {
+            guard let windows else { respond(conn, "404 Not Found", json: nil); return }
+            Task { self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(await windows())) }
+            return
+        }
+
+        // POST /compact/open — open/focus an app (or window) and fit it to the
+        // device's screen; the response names the window to stream.
+        if method == "POST", segs.count == 2, segs[0] == "compact", segs[1] == "open" {
+            guard let compactOpen else { respond(conn, "404 Not Found", json: nil); return }
+            guard let req = try? CompanionJSON.decoder.decode(CompanionCompactOpenRequestDTO.self, from: body) else {
+                respond(conn, "400 Bad Request", json: nil); return
+            }
+            Task {
+                if let resp = await compactOpen(req) {
+                    self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(resp))
+                } else {
+                    self.respond(conn, "409 Conflict", json: nil)
+                }
             }
             return
         }

@@ -24,6 +24,8 @@ public struct ControlEvent: Codable, Sendable {
     public var down: Bool?         // key down vs up
     public var mods: [String]?     // "cmd" | "ctrl" | "opt" | "shift" (combo chords)
     public var v: Double?          // 0…1 value (volume)
+    public var w: Int?             // window id — map x/y over this window's bounds
+                                   // instead of the display (CompactOS)
 
     public init(t: String) { self.t = t }
 }
