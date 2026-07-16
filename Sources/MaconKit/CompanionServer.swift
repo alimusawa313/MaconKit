@@ -105,6 +105,12 @@ public final class CompanionServer: @unchecked Sendable {
     private let unlock: (@Sendable () async -> Bool)?
     /// Raise the Mac's privacy curtain (e.g. right after a remote unlock).
     private let privacy: (@Sendable () async -> Void)?
+    /// AI (local Ollama proxy). `aiModels` returns the encoded model list, or
+    /// nil when the local model host is unreachable/disabled → 503. `aiChat`
+    /// streams the reply: it forwards the request body to the local host and
+    /// calls `emit` once per NDJSON line, which we relay to the client.
+    private let aiModels: (@Sendable () async -> Data?)?
+    private let aiChat: (@Sendable (_ body: Data, _ emit: @escaping @Sendable (Data) -> Void) async -> Void)?
 
     private static let controlDecoder = JSONDecoder()
 
@@ -127,6 +133,8 @@ public final class CompanionServer: @unchecked Sendable {
                 wake: (@Sendable () async -> Void)? = nil,
                 unlock: (@Sendable () async -> Bool)? = nil,
                 privacy: (@Sendable () async -> Void)? = nil,
+                aiModels: (@Sendable () async -> Data?)? = nil,
+                aiChat: (@Sendable (_ body: Data, _ emit: @escaping @Sendable (Data) -> Void) async -> Void)? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8899
         self.authorize = authorize
@@ -147,6 +155,8 @@ public final class CompanionServer: @unchecked Sendable {
         self.wake = wake
         self.unlock = unlock
         self.privacy = privacy
+        self.aiModels = aiModels
+        self.aiChat = aiChat
         self.onLog = onLog
     }
 
@@ -347,6 +357,37 @@ public final class CompanionServer: @unchecked Sendable {
         if method == "POST", segs.count == 2, segs[0] == "power", segs[1] == "privacy" {
             guard let privacy else { respond(conn, "404 Not Found", json: nil); return }
             Task { await privacy(); self.respond(conn, "200 OK", json: nil) }
+            return
+        }
+
+        // GET /ai/models — models available on the Mac's local Ollama.
+        if method == "GET", path == "/ai/models" {
+            guard let aiModels else { respond(conn, "404 Not Found", json: nil); return }
+            Task {
+                if let data = await aiModels() {
+                    self.respond(conn, "200 OK", json: data)
+                } else {
+                    self.respond(conn, "503 Service Unavailable", json: nil)
+                }
+            }
+            return
+        }
+
+        // POST /ai/chat — stream a chat completion. The reply is NDJSON (one
+        // JSON object per line), sent with Connection: close so the client
+        // reads to EOF; each line is relayed the instant Ollama produces it.
+        if method == "POST", path == "/ai/chat" {
+            guard let aiChat else { respond(conn, "404 Not Found", json: nil); return }
+            let head = "HTTP/1.1 200 OK\r\n"
+                + "Content-Type: application/x-ndjson\r\n"
+                + "Connection: close\r\n\r\n"
+            conn.send(content: Data(head.utf8), completion: .contentProcessed { _ in })
+            Task {
+                await aiChat(body) { line in
+                    conn.send(content: line, completion: .contentProcessed { _ in })
+                }
+                conn.cancel()
+            }
             return
         }
 
