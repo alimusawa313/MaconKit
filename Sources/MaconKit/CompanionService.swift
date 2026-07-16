@@ -28,6 +28,7 @@ public final class CompanionService {
                 power: (@Sendable () async -> CompanionPowerDTO)? = nil,
                 wake: (@Sendable () async -> Void)? = nil,
                 unlock: (@Sendable () async -> Bool)? = nil,
+                privacy: (@Sendable () async -> Void)? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.store = store
         let data = CompanionData(runners: runners, runnerName: runnerName, pool: pool)
@@ -70,6 +71,7 @@ public final class CompanionService {
             power: power,
             wake: wake,
             unlock: unlock,
+            privacy: privacy,
             onLog: onLog)
     }
 

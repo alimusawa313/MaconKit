@@ -103,6 +103,8 @@ public final class CompanionServer: @unchecked Sendable {
     private let power: (@Sendable () async -> CompanionPowerDTO)?
     private let wake: (@Sendable () async -> Void)?
     private let unlock: (@Sendable () async -> Bool)?
+    /// Raise the Mac's privacy curtain (e.g. right after a remote unlock).
+    private let privacy: (@Sendable () async -> Void)?
 
     private static let controlDecoder = JSONDecoder()
 
@@ -124,6 +126,7 @@ public final class CompanionServer: @unchecked Sendable {
                 power: (@Sendable () async -> CompanionPowerDTO)? = nil,
                 wake: (@Sendable () async -> Void)? = nil,
                 unlock: (@Sendable () async -> Bool)? = nil,
+                privacy: (@Sendable () async -> Void)? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8899
         self.authorize = authorize
@@ -143,6 +146,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.power = power
         self.wake = wake
         self.unlock = unlock
+        self.privacy = privacy
         self.onLog = onLog
     }
 
@@ -336,6 +340,13 @@ public final class CompanionServer: @unchecked Sendable {
                 let ok = await unlock()
                 self.respond(conn, ok ? "200 OK" : "409 Conflict", json: nil)
             }
+            return
+        }
+
+        // POST /power/privacy — raise the Mac's privacy curtain.
+        if method == "POST", segs.count == 2, segs[0] == "power", segs[1] == "privacy" {
+            guard let privacy else { respond(conn, "404 Not Found", json: nil); return }
+            Task { await privacy(); self.respond(conn, "200 OK", json: nil) }
             return
         }
 
