@@ -181,6 +181,24 @@ public struct CompanionCompactOpenResponseDTO: Codable, Sendable {
     }
 }
 
+/// `GET /power` — the Mac's reachability + wake/unlock state, so the device
+/// can wake it (Wake-on-LAN) and offer unlock.
+public struct CompanionPowerDTO: Codable, Sendable {
+    public var locked: Bool            // login/lock window is up
+    public var displayAsleep: Bool     // the display has slept
+    public var keepAwake: Bool         // a keep-awake assertion is held
+    public var canWake: Bool           // remote wake is allowed
+    public var canUnlock: Bool         // remote unlock is allowed (password stored)
+    public var mac: String?            // primary NIC MAC, for Wake-on-LAN
+    public var broadcast: String?      // subnet broadcast address, for WoL
+    public init(locked: Bool, displayAsleep: Bool, keepAwake: Bool,
+                canWake: Bool, canUnlock: Bool, mac: String?, broadcast: String?) {
+        self.locked = locked; self.displayAsleep = displayAsleep; self.keepAwake = keepAwake
+        self.canWake = canWake; self.canUnlock = canUnlock
+        self.mac = mac; self.broadcast = broadcast
+    }
+}
+
 /// A plain list of names (repos, branches) for the app's pickers.
 public struct CompanionListDTO: Codable, Sendable {
     public var values: [String]

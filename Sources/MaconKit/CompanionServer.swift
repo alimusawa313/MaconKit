@@ -98,6 +98,11 @@ public final class CompanionServer: @unchecked Sendable {
     /// CompactOS: point the screen stream at one window (nil = whole display).
     /// Called on every /screen connect — last viewer wins.
     private let screenTarget: (@Sendable (UInt32?) -> Void)?
+    /// Power: reachability/wake/unlock. `power` reports state; `wake` lights the
+    /// display; `unlock` types the stored password (returns whether it applied).
+    private let power: (@Sendable () async -> CompanionPowerDTO)?
+    private let wake: (@Sendable () async -> Void)?
+    private let unlock: (@Sendable () async -> Bool)?
 
     private static let controlDecoder = JSONDecoder()
 
@@ -116,6 +121,9 @@ public final class CompanionServer: @unchecked Sendable {
                 windows: (@Sendable () async -> CompanionWindowsDTO)? = nil,
                 compactOpen: (@Sendable (CompanionCompactOpenRequestDTO) async -> CompanionCompactOpenResponseDTO?)? = nil,
                 screenTarget: (@Sendable (UInt32?) -> Void)? = nil,
+                power: (@Sendable () async -> CompanionPowerDTO)? = nil,
+                wake: (@Sendable () async -> Void)? = nil,
+                unlock: (@Sendable () async -> Bool)? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8899
         self.authorize = authorize
@@ -132,6 +140,9 @@ public final class CompanionServer: @unchecked Sendable {
         self.windows = windows
         self.compactOpen = compactOpen
         self.screenTarget = screenTarget
+        self.power = power
+        self.wake = wake
+        self.unlock = unlock
         self.onLog = onLog
     }
 
@@ -300,6 +311,30 @@ public final class CompanionServer: @unchecked Sendable {
                 } else {
                     self.respond(conn, "409 Conflict", json: nil)
                 }
+            }
+            return
+        }
+
+        // GET /power — reachability + wake/unlock state (and the MAC for WoL).
+        if method == "GET", path == "/power" {
+            guard let power else { respond(conn, "404 Not Found", json: nil); return }
+            Task { self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(await power())) }
+            return
+        }
+
+        // POST /power/wake — light the display / declare activity.
+        if method == "POST", segs.count == 2, segs[0] == "power", segs[1] == "wake" {
+            guard let wake else { respond(conn, "404 Not Found", json: nil); return }
+            Task { await wake(); self.respond(conn, "200 OK", json: nil) }
+            return
+        }
+
+        // POST /power/unlock — type the stored password at the lock screen.
+        if method == "POST", segs.count == 2, segs[0] == "power", segs[1] == "unlock" {
+            guard let unlock else { respond(conn, "404 Not Found", json: nil); return }
+            Task {
+                let ok = await unlock()
+                self.respond(conn, ok ? "200 OK" : "409 Conflict", json: nil)
             }
             return
         }
