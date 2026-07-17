@@ -67,6 +67,24 @@ public final class CompanionServer: @unchecked Sendable {
         }
     }
 
+    /// Native file access for the companion's Code editor (nil = the /code
+    /// routes 404). Every op is gated by the app's "allow code" toggle.
+    public struct CodeOps: Sendable {
+        public var list: @Sendable (String) async -> CompanionCodeListDTO?
+        public var read: @Sendable (String) async -> CompanionCodeFileDTO?
+        /// Returns false when the write was refused (bad path, not text).
+        public var write: @Sendable (String, String) async -> Bool
+        /// Open the path in the Mac's editor (VS Code); false when refused.
+        public var open: @Sendable (String) async -> Bool
+
+        public init(list: @escaping @Sendable (String) async -> CompanionCodeListDTO?,
+                    read: @escaping @Sendable (String) async -> CompanionCodeFileDTO?,
+                    write: @escaping @Sendable (String, String) async -> Bool,
+                    open: @escaping @Sendable (String) async -> Bool) {
+            self.list = list; self.read = read; self.write = write; self.open = open
+        }
+    }
+
     private let port: NWEndpoint.Port
     private let queue = DispatchQueue(label: "macon.companion")
     private var listener: NWListener?
@@ -111,6 +129,7 @@ public final class CompanionServer: @unchecked Sendable {
     /// calls `emit` once per NDJSON line, which we relay to the client.
     private let aiModels: (@Sendable () async -> Data?)?
     private let aiChat: (@Sendable (_ body: Data, _ emit: @escaping @Sendable (Data) -> Void) async -> Void)?
+    private let codeOps: CodeOps?
 
     private static let controlDecoder = JSONDecoder()
 
@@ -135,6 +154,7 @@ public final class CompanionServer: @unchecked Sendable {
                 privacy: (@Sendable () async -> Void)? = nil,
                 aiModels: (@Sendable () async -> Data?)? = nil,
                 aiChat: (@Sendable (_ body: Data, _ emit: @escaping @Sendable (Data) -> Void) async -> Void)? = nil,
+                codeOps: CodeOps? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8899
         self.authorize = authorize
@@ -157,6 +177,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.privacy = privacy
         self.aiModels = aiModels
         self.aiChat = aiChat
+        self.codeOps = codeOps
         self.onLog = onLog
     }
 
@@ -389,6 +410,54 @@ public final class CompanionServer: @unchecked Sendable {
                 conn.cancel()
             }
             return
+        }
+
+        // /code — native file browsing/editing for the companion's Code screen.
+        if segs.first == "code" {
+            guard let codeOps else { respond(conn, "404 Not Found", json: nil); return }
+
+            // GET /code/list?path= — directory listing (folders first).
+            if method == "GET", segs.count == 2, segs[1] == "list" {
+                let dir = query["path"] ?? "~"
+                Task {
+                    if let listing = await codeOps.list(dir) {
+                        self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(listing))
+                    } else { self.respond(conn, "404 Not Found", json: nil) }
+                }
+                return
+            }
+            // GET /code/file?path= — read a text file (415 if not UTF-8 text).
+            if method == "GET", segs.count == 2, segs[1] == "file" {
+                let file = query["path"] ?? ""
+                Task {
+                    if let dto = await codeOps.read(file) {
+                        self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(dto))
+                    } else { self.respond(conn, "415 Unsupported Media Type", json: nil) }
+                }
+                return
+            }
+            // PUT /code/file — write a text file back.
+            if method == "PUT", segs.count == 2, segs[1] == "file" {
+                guard let dto = try? CompanionJSON.decoder.decode(CompanionCodeFileDTO.self, from: body) else {
+                    respond(conn, "400 Bad Request", json: nil); return
+                }
+                Task {
+                    let ok = await codeOps.write(dto.path, dto.content)
+                    self.respond(conn, ok ? "200 OK" : "409 Conflict", json: nil)
+                }
+                return
+            }
+            // POST /code/open — open the path in the Mac's editor.
+            if method == "POST", segs.count == 2, segs[1] == "open" {
+                guard let dto = try? CompanionJSON.decoder.decode(CompanionCodeOpenDTO.self, from: body) else {
+                    respond(conn, "400 Bad Request", json: nil); return
+                }
+                Task {
+                    let ok = await codeOps.open(dto.path)
+                    self.respond(conn, ok ? "200 OK" : "409 Conflict", json: nil)
+                }
+                return
+            }
         }
 
         // GET /builds

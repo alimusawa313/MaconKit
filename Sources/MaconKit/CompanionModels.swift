@@ -199,6 +199,43 @@ public struct CompanionPowerDTO: Codable, Sendable {
     }
 }
 
+// MARK: - Code (native file editing)
+
+/// One entry in a directory listing (`GET /code/list`).
+public struct CompanionCodeEntryDTO: Codable, Sendable {
+    public var name: String
+    public var path: String
+    public var dir: Bool
+    public var size: Int64
+    public init(name: String, path: String, dir: Bool, size: Int64) {
+        self.name = name; self.path = path; self.dir = dir; self.size = size
+    }
+}
+
+/// A directory listing, folders first (`GET /code/list?path=`).
+public struct CompanionCodeListDTO: Codable, Sendable {
+    public var path: String
+    public var entries: [CompanionCodeEntryDTO]
+    public init(path: String, entries: [CompanionCodeEntryDTO]) {
+        self.path = path; self.entries = entries
+    }
+}
+
+/// A text file's content (`GET /code/file?path=`, and the `PUT` body).
+public struct CompanionCodeFileDTO: Codable, Sendable {
+    public var path: String
+    public var content: String
+    public init(path: String, content: String) {
+        self.path = path; self.content = content
+    }
+}
+
+/// `POST /code/open` body — hand a path to the Mac's editor.
+public struct CompanionCodeOpenDTO: Codable, Sendable {
+    public var path: String
+    public init(path: String) { self.path = path }
+}
+
 /// A plain list of names (repos, branches) for the app's pickers.
 public struct CompanionListDTO: Codable, Sendable {
     public var values: [String]
