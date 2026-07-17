@@ -76,12 +76,19 @@ public final class CompanionServer: @unchecked Sendable {
         public var write: @Sendable (String, String) async -> Bool
         /// Open the path in the Mac's editor (VS Code); false when refused.
         public var open: @Sendable (String) async -> Bool
+        /// Xcode projects/workspaces on the Mac (nil = refused/off).
+        public var xcodeProjects: (@Sendable () async -> CompanionCodeListDTO?)?
+        /// A project's schemes, via xcodebuild (nil = refused/failed).
+        public var xcodeSchemes: (@Sendable (String) async -> CompanionListDTO?)?
 
         public init(list: @escaping @Sendable (String) async -> CompanionCodeListDTO?,
                     read: @escaping @Sendable (String) async -> CompanionCodeFileDTO?,
                     write: @escaping @Sendable (String, String) async -> Bool,
-                    open: @escaping @Sendable (String) async -> Bool) {
+                    open: @escaping @Sendable (String) async -> Bool,
+                    xcodeProjects: (@Sendable () async -> CompanionCodeListDTO?)? = nil,
+                    xcodeSchemes: (@Sendable (String) async -> CompanionListDTO?)? = nil) {
             self.list = list; self.read = read; self.write = write; self.open = open
+            self.xcodeProjects = xcodeProjects; self.xcodeSchemes = xcodeSchemes
         }
     }
 
@@ -453,6 +460,27 @@ public final class CompanionServer: @unchecked Sendable {
         if segs.first == "code" {
             guard let codeOps else { respond(conn, "404 Not Found", json: nil); return }
 
+            // GET /code/xcode/projects — Xcode projects/workspaces on the Mac.
+            if method == "GET", segs.count == 3, segs[1] == "xcode", segs[2] == "projects" {
+                guard let fetch = codeOps.xcodeProjects else { respond(conn, "404 Not Found", json: nil); return }
+                Task {
+                    if let listing = await fetch() {
+                        self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(listing))
+                    } else { self.respond(conn, "404 Not Found", json: nil) }
+                }
+                return
+            }
+            // GET /code/xcode/schemes?path= — a project's schemes (xcodebuild).
+            if method == "GET", segs.count == 3, segs[1] == "xcode", segs[2] == "schemes" {
+                guard let fetch = codeOps.xcodeSchemes else { respond(conn, "404 Not Found", json: nil); return }
+                let project = query["path"] ?? ""
+                Task {
+                    if let schemes = await fetch(project) {
+                        self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(schemes))
+                    } else { self.respond(conn, "502 Bad Gateway", json: nil) }
+                }
+                return
+            }
             // GET /code/list?path= — directory listing (folders first).
             if method == "GET", segs.count == 2, segs[1] == "list" {
                 let dir = query["path"] ?? "~"
