@@ -80,15 +80,19 @@ public final class CompanionServer: @unchecked Sendable {
         public var xcodeProjects: (@Sendable () async -> CompanionCodeListDTO?)?
         /// A project's schemes, via xcodebuild (nil = refused/failed).
         public var xcodeSchemes: (@Sendable (String) async -> CompanionListDTO?)?
+        /// xcodebuild destination strings (the Mac + available simulators).
+        public var xcodeDestinations: (@Sendable () async -> CompanionListDTO?)?
 
         public init(list: @escaping @Sendable (String) async -> CompanionCodeListDTO?,
                     read: @escaping @Sendable (String) async -> CompanionCodeFileDTO?,
                     write: @escaping @Sendable (String, String) async -> Bool,
                     open: @escaping @Sendable (String) async -> Bool,
                     xcodeProjects: (@Sendable () async -> CompanionCodeListDTO?)? = nil,
-                    xcodeSchemes: (@Sendable (String) async -> CompanionListDTO?)? = nil) {
+                    xcodeSchemes: (@Sendable (String) async -> CompanionListDTO?)? = nil,
+                    xcodeDestinations: (@Sendable () async -> CompanionListDTO?)? = nil) {
             self.list = list; self.read = read; self.write = write; self.open = open
             self.xcodeProjects = xcodeProjects; self.xcodeSchemes = xcodeSchemes
+            self.xcodeDestinations = xcodeDestinations
         }
     }
 
@@ -466,6 +470,16 @@ public final class CompanionServer: @unchecked Sendable {
                 Task {
                     if let listing = await fetch() {
                         self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(listing))
+                    } else { self.respond(conn, "404 Not Found", json: nil) }
+                }
+                return
+            }
+            // GET /code/xcode/destinations — xcodebuild destination strings.
+            if method == "GET", segs.count == 3, segs[1] == "xcode", segs[2] == "destinations" {
+                guard let fetch = codeOps.xcodeDestinations else { respond(conn, "404 Not Found", json: nil); return }
+                Task {
+                    if let list = await fetch() {
+                        self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(list))
                     } else { self.respond(conn, "404 Not Found", json: nil) }
                 }
                 return
