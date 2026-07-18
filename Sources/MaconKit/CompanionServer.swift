@@ -231,6 +231,16 @@ public final class CompanionServer: @unchecked Sendable {
             // interactive video so Wi-Fi (WMM) prioritizes our packets.
             let tcp = NWProtocolTCP.Options()
             tcp.noDelay = true
+            // Detect a dead peer promptly. Without this, a companion that
+            // vanishes uncleanly (app killed, Wi-Fi dropped, Mac slept) leaves
+            // its socket "open" — and a live /screen viewer keeps the capture +
+            // H.264 encoder running full-tilt to nobody, pinning the CPU. With
+            // keepalive the OS errors the connection in ~20s, so drainClient
+            // removes the viewer and capture stops on its own.
+            tcp.enableKeepalive = true
+            tcp.keepaliveIdle = 10          // start probing after 10s idle
+            tcp.keepaliveInterval = 5       // probe every 5s
+            tcp.keepaliveCount = 2          // give up after 2 misses (~20s)
             let params = NWParameters(tls: nil, tcp: tcp)
             params.allowLocalEndpointReuse = true
             params.serviceClass = .interactiveVideo
