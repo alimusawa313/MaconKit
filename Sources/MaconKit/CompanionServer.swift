@@ -115,6 +115,35 @@ public final class CompanionServer: @unchecked Sendable {
         }
     }
 
+    /// The Flows feature (visual automations the companion edits, the Mac
+    /// runs). Payloads stay opaque Data — the app owns the shapes — so the
+    /// routes are pure plumbing. nil ops = the /flows routes 404; a closure
+    /// returning nil = refused (403, feature off) or unknown id (404).
+    public struct FlowOps: Sendable {
+        public var list: @Sendable () async -> Data?
+        public var save: @Sendable (Data) async -> Bool
+        public var remove: @Sendable (String) async -> Bool
+        /// Start a run: flow id + request body → {runId} JSON.
+        public var run: @Sendable (String, Data) async -> Data?
+        /// A flow's finished runs, newest first.
+        public var runs: @Sendable (String) async -> Data?
+        /// One run — live state while executing, else from history.
+        public var runDetail: @Sendable (String) async -> Data?
+        public var cancel: @Sendable (String) async -> Bool
+
+        public init(list: @escaping @Sendable () async -> Data?,
+                    save: @escaping @Sendable (Data) async -> Bool,
+                    remove: @escaping @Sendable (String) async -> Bool,
+                    run: @escaping @Sendable (String, Data) async -> Data?,
+                    runs: @escaping @Sendable (String) async -> Data?,
+                    runDetail: @escaping @Sendable (String) async -> Data?,
+                    cancel: @escaping @Sendable (String) async -> Bool) {
+            self.list = list; self.save = save; self.remove = remove
+            self.run = run; self.runs = runs; self.runDetail = runDetail
+            self.cancel = cancel
+        }
+    }
+
     /// One inbound terminal frame: keystrokes (base64) or a resize.
     private struct TermInbound: Decodable {
         let t: String            // "in" | "size"
@@ -169,6 +198,7 @@ public final class CompanionServer: @unchecked Sendable {
     private let aiChat: (@Sendable (_ body: Data, _ emit: @escaping @Sendable (Data) -> Void) async -> Void)?
     private let codeOps: CodeOps?
     private let termOps: TermOps?
+    private let flowOps: FlowOps?
 
     private static let controlDecoder = JSONDecoder()
 
@@ -195,6 +225,7 @@ public final class CompanionServer: @unchecked Sendable {
                 aiChat: (@Sendable (_ body: Data, _ emit: @escaping @Sendable (Data) -> Void) async -> Void)? = nil,
                 codeOps: CodeOps? = nil,
                 termOps: TermOps? = nil,
+                flowOps: FlowOps? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8899
         self.authorize = authorize
@@ -219,6 +250,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.aiChat = aiChat
         self.codeOps = codeOps
         self.termOps = termOps
+        self.flowOps = flowOps
         self.onLog = onLog
     }
 
@@ -545,6 +577,64 @@ public final class CompanionServer: @unchecked Sendable {
                     let ok = await codeOps.open(dto.path)
                     self.respond(conn, ok ? "200 OK" : "409 Conflict", json: nil)
                 }
+                return
+            }
+        }
+
+        // /flows — visual automations: the companion edits them, this Mac runs
+        // them. Bodies are opaque to the server (the app owns the shapes).
+        if segs.first == "flows" {
+            guard let ops = flowOps else { respond(conn, "404 Not Found", json: nil); return }
+
+            // GET /flows — every saved flow.
+            if method == "GET", segs.count == 1 {
+                Task {
+                    if let data = await ops.list() {
+                        self.respond(conn, "200 OK", json: data)
+                    } else { self.respond(conn, "403 Forbidden", json: nil) }
+                }
+                return
+            }
+            // PUT /flows — upsert one flow (whole graph).
+            if method == "PUT", segs.count == 1 {
+                Task { self.respond(conn, await ops.save(body) ? "200 OK" : "403 Forbidden", json: nil) }
+                return
+            }
+            // GET /flows/runs/{runId} — one run (live while executing).
+            if method == "GET", segs.count == 3, segs[1] == "runs" {
+                Task {
+                    if let data = await ops.runDetail(segs[2]) {
+                        self.respond(conn, "200 OK", json: data)
+                    } else { self.respond(conn, "404 Not Found", json: nil) }
+                }
+                return
+            }
+            // POST /flows/runs/{runId}/cancel
+            if method == "POST", segs.count == 4, segs[1] == "runs", segs[3] == "cancel" {
+                Task { self.respond(conn, await ops.cancel(segs[2]) ? "200 OK" : "404 Not Found", json: nil) }
+                return
+            }
+            // GET /flows/{id}/runs — the flow's run history.
+            if method == "GET", segs.count == 3, segs[2] == "runs" {
+                Task {
+                    if let data = await ops.runs(segs[1]) {
+                        self.respond(conn, "200 OK", json: data)
+                    } else { self.respond(conn, "403 Forbidden", json: nil) }
+                }
+                return
+            }
+            // POST /flows/{id}/run — start a run; body carries payload/key.
+            if method == "POST", segs.count == 3, segs[2] == "run" {
+                Task {
+                    if let data = await ops.run(segs[1], body) {
+                        self.respond(conn, "200 OK", json: data)
+                    } else { self.respond(conn, "403 Forbidden", json: nil) }
+                }
+                return
+            }
+            // DELETE /flows/{id}
+            if method == "DELETE", segs.count == 2 {
+                Task { self.respond(conn, await ops.remove(segs[1]) ? "200 OK" : "404 Not Found", json: nil) }
                 return
             }
         }
