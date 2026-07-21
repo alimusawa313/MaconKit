@@ -45,7 +45,9 @@ public enum Shell {
 
         pipe.fileHandleForReading.readabilityHandler = { h in
             let d = h.availableData
-            guard !d.isEmpty, let s = String(data: d, encoding: .utf8) else { return }
+            // EOF: clear the handler or the system re-invokes it forever.
+            guard !d.isEmpty else { h.readabilityHandler = nil; return }
+            guard let s = String(data: d, encoding: .utf8) else { return }
             emit(s)
         }
 

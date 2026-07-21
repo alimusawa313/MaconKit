@@ -100,11 +100,13 @@ public final class RunnerAgent: ObservableObject, Identifiable {
         proc.standardError = pipe
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard !data.isEmpty,
-                  let chunk = String(data: data, encoding: .utf8) else { return }
+            // EOF: clear the handler or the system re-invokes it forever.
+            guard !data.isEmpty else { handle.readabilityHandler = nil; return }
+            guard let chunk = String(data: data, encoding: .utf8) else { return }
             Task { @MainActor in self?.ingest(chunk) }
         }
         proc.terminationHandler = { [weak self] p in
+            pipe.fileHandleForReading.readabilityHandler = nil
             let status = p.terminationStatus
             Task { @MainActor in self?.handleTermination(status: status) }
         }
