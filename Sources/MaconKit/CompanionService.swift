@@ -34,6 +34,8 @@ public final class CompanionService {
                 codeOps: CompanionServer.CodeOps? = nil,
                 termOps: CompanionServer.TermOps? = nil,
                 flowOps: CompanionServer.FlowOps? = nil,
+                devices: (@Sendable () async -> Data?)? = nil,
+                onAuthorize: (@Sendable (String) -> Void)? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.store = store
         let data = CompanionData(runners: runners, runnerName: runnerName, pool: pool)
@@ -53,7 +55,13 @@ public final class CompanionService {
 
         self.server = CompanionServer(
             port: port,
-            authorize: { store.authorize($0) },
+            // Every authorized request marks its device as seen — that's the
+            // liveness signal behind the fleet map.
+            authorize: { token in
+                let ok = store.authorize(token)
+                if ok { onAuthorize?(token) }
+                return ok
+            },
             pair: { code, device in
                 guard let token = store.pair(code: code, device: device) else { return nil }
                 return CompanionPairResponseDTO(token: token, runnerName: runnerName)
@@ -82,6 +90,7 @@ public final class CompanionService {
             codeOps: codeOps,
             termOps: termOps,
             flowOps: flowOps,
+            devices: devices,
             onLog: onLog)
     }
 
