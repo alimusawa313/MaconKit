@@ -24,6 +24,8 @@ public final class PipelineRunner: ObservableObject, Identifiable {
     public var makeClient: (GitProviderKind) -> (any GitProvider)? = { _ in nil }
     /// Supplies the pool's global secrets (shared by all pipelines).
     public var loadGlobalSecrets: () -> [String: String] = { [:] }
+    /// Fired at build lifecycle transitions — the app turns these into pushes.
+    public var onBuildEvent: (@MainActor (BuildEvent) -> Void)?
 
     public var id: UUID { config.id }
 
@@ -60,6 +62,12 @@ public final class PipelineRunner: ObservableObject, Identifiable {
         // Remember the last commit we actually built, so re-launching and
         // watching doesn't rebuild a commit we've already handled.
         lastBuiltSHA = history.first?.shaFull
+    }
+
+    /// Announce a build lifecycle moment to whoever's listening.
+    private func emit(_ phase: BuildEvent.Phase, sha: String, detail: String? = nil) {
+        onBuildEvent?(BuildEvent(pipelineID: config.id.uuidString, pipelineName: config.name,
+                                 phase: phase, sha: sha, branch: config.branch, detail: detail))
     }
 
     /// Load a past run's log lines (off the main actor).
@@ -281,6 +289,7 @@ public final class PipelineRunner: ObservableObject, Identifiable {
         } else {
             appendLine("──────── build \(sha.prefix(8)) ────────")
         }
+        emit(.started, sha: sha, detail: pr.map { "PR #\($0.id): \($0.title)" })
 
         // Watchdog: cancel a build that outruns the timeout. Captures this build's
         // control so a later build is never affected.
@@ -334,16 +343,19 @@ public final class PipelineRunner: ObservableObject, Identifiable {
             buildState = .failed(sha: sha)
             appendLine("⏹ Build cancelled.")
             if config.postStatus { await post(client, sha: sha, state: .failed, desc: "Cancelled on MacON") }
+            emit(.cancelled, sha: sha)
         } else if code == 0 {
             result = .succeeded
             buildState = .succeeded(sha: sha)
             appendLine("✅ Build passed.")
             if config.postStatus { await post(client, sha: sha, state: .successful, desc: "Passed on MacON") }
+            emit(.passed, sha: sha)
         } else {
             result = .failed
             buildState = .failed(sha: sha)
             appendLine("❌ Build failed (exit \(code)).")
             if config.postStatus { await post(client, sha: sha, state: .failed, desc: "Failed on MacON (exit \(code))") }
+            emit(.failed, sha: sha, detail: "exit \(code)")
         }
 
         // Persist this run to history.

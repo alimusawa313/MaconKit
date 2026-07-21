@@ -12,6 +12,11 @@ import Combine
 public final class PipelinePool: ObservableObject {
 
     @Published public private(set) var pipelines: [PipelineRunner] = []
+    /// Set by the app to receive every pipeline's build events (for pushes).
+    /// Applied to existing and future runners.
+    public var onBuildEvent: (@MainActor (BuildEvent) -> Void)? {
+        didSet { for p in pipelines { p.onBuildEvent = onBuildEvent } }
+    }
 
     // Shared Bitbucket account (email in UserDefaults, token in Keychain).
     @Published public var email: String {
@@ -122,6 +127,7 @@ public final class PipelinePool: ObservableObject {
         let runner = PipelineRunner(config: cfg)
         runner.makeClient = { [weak self] kind in self?.makeClient(for: kind) }
         runner.loadGlobalSecrets = { [weak self] in self?.globalSecrets() ?? [:] }
+        runner.onBuildEvent = onBuildEvent
         // Forward child changes so the menu bar / aggregate counts stay in sync.
         runner.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
