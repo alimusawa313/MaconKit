@@ -11,7 +11,8 @@ import Foundation
 
 public struct ControlEvent: Codable, Sendable {
     /// "move" | "movedelta" | "mouse" | "click" | "scroll" | "text" | "key" |
-    /// "combo" | "media" | "volume" | "fps" | "res" | "launch" (s = .app path)
+    /// "keyreset" (drop held modifiers) | "combo" | "media" | "volume" |
+    /// "fps" | "res" | "launch" (s = .app path)
     public var t: String
     public var x: Double?          // normalized cursor position
     public var y: Double?
