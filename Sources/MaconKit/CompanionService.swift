@@ -36,6 +36,7 @@ public final class CompanionService {
                 flowOps: CompanionServer.FlowOps? = nil,
                 devices: (@Sendable () async -> Data?)? = nil,
                 apnsRegister: (@Sendable (_ bearer: String, _ body: Data) async -> Bool)? = nil,
+                agentOps: CompanionServer.AgentOps? = nil,
                 onAuthorize: (@Sendable (String) -> Void)? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.store = store
@@ -93,6 +94,7 @@ public final class CompanionService {
             flowOps: flowOps,
             devices: devices,
             apnsRegister: apnsRegister,
+            agentOps: agentOps,
             onLog: onLog)
     }
 

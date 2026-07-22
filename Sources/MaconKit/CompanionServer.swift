@@ -20,6 +20,10 @@
 //    POST /pipelines/{id}/watch|unwatch|run  (Bearer)  runner controls
 //    GET  /windows              (Bearer)   open Mac windows (CompactOS picker)
 //    POST /compact/open         (Bearer)   open/fit an app window for CompactOS
+//    POST /agent/task           (Bearer)   dictate a task; the Mac drives itself
+//    WS   /agent/{id}/events    (Bearer)   agent step feed (JSON text frames)
+//    POST /agent/{id}/stop      (Bearer)   abort an agent run
+//    POST /agent/{id}/decision  (Bearer)   approve/skip an awaiting agent step
 //    WS   /screen?window={id}   (Bearer)   stream one window instead of the display
 //
 //  Meant to sit behind a cloudflared tunnel (which terminates TLS), so a
@@ -144,6 +148,28 @@ public final class CompanionServer: @unchecked Sendable {
         }
     }
 
+    /// The Mac-side agent: dictate a task, the Mac drives itself against the
+    /// accessibility tree (nil = the /agent routes 404). Gated by the app's
+    /// "allow control" toggle — a task IS remote control.
+    public struct AgentOps: Sendable {
+        /// Start a task. Nil = refused (control off) → 409.
+        public var start: @Sendable (CompanionAgentTaskRequestDTO) async -> CompanionAgentStartResponseDTO?
+        /// Step-feed events after a seq (the WS poll loop + the JSON route).
+        public var eventsSince: @Sendable (String, Int) async -> [CompanionAgentEventDTO]
+        /// Abort a run. False = unknown agent id.
+        public var stop: @Sendable (String) async -> Bool
+        /// Approve/skip the step an `approval` event named.
+        public var decision: @Sendable (String, Int, Bool) async -> Bool
+
+        public init(start: @escaping @Sendable (CompanionAgentTaskRequestDTO) async -> CompanionAgentStartResponseDTO?,
+                    eventsSince: @escaping @Sendable (String, Int) async -> [CompanionAgentEventDTO],
+                    stop: @escaping @Sendable (String) async -> Bool,
+                    decision: @escaping @Sendable (String, Int, Bool) async -> Bool) {
+            self.start = start; self.eventsSince = eventsSince
+            self.stop = stop; self.decision = decision
+        }
+    }
+
     /// One inbound terminal frame: keystrokes (base64) or a resize.
     private struct TermInbound: Decodable {
         let t: String            // "in" | "size"
@@ -205,6 +231,8 @@ public final class CompanionServer: @unchecked Sendable {
     /// Push: a device hands the Mac its APNs token so build alerts reach it.
     /// The bearer token identifies which paired device; body is opaque.
     private let apnsRegister: (@Sendable (_ bearer: String, _ body: Data) async -> Bool)?
+    /// The dictate-to-drive Mac agent (nil disables the /agent routes).
+    private let agentOps: AgentOps?
 
     private static let controlDecoder = JSONDecoder()
 
@@ -234,6 +262,7 @@ public final class CompanionServer: @unchecked Sendable {
                 flowOps: FlowOps? = nil,
                 devices: (@Sendable () async -> Data?)? = nil,
                 apnsRegister: (@Sendable (_ bearer: String, _ body: Data) async -> Bool)? = nil,
+                agentOps: AgentOps? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8899
         self.authorize = authorize
@@ -261,6 +290,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.flowOps = flowOps
         self.devices = devices
         self.apnsRegister = apnsRegister
+        self.agentOps = agentOps
         self.onLog = onLog
     }
 
@@ -461,6 +491,66 @@ public final class CompanionServer: @unchecked Sendable {
             Task {
                 let ok = await apnsRegister(token, body)
                 self.respond(conn, ok ? "200 OK" : "400 Bad Request", json: nil)
+            }
+            return
+        }
+
+        // POST /agent/task — dictate a task; the Mac plans + drives itself.
+        if method == "POST", segs.count == 2, segs[0] == "agent", segs[1] == "task" {
+            guard let agentOps else { respond(conn, "404 Not Found", json: nil); return }
+            guard let req = try? CompanionJSON.decoder.decode(CompanionAgentTaskRequestDTO.self, from: body) else {
+                respond(conn, "400 Bad Request", json: nil); return
+            }
+            Task {
+                if let resp = await agentOps.start(req) {
+                    self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(resp))
+                } else {
+                    self.respond(conn, "409 Conflict", json: nil)   // control off on the Mac
+                }
+            }
+            return
+        }
+
+        // WS /agent/{id}/events — the live step feed.
+        if method == "GET", segs.count == 3, segs[0] == "agent", segs[2] == "events",
+           headerValue(header, "upgrade")?.lowercased() == "websocket" {
+            guard agentOps != nil else { respond(conn, "404 Not Found", json: nil); return }
+            upgradeAndStreamAgent(conn, header: header, agentID: segs[1]); return
+        }
+
+        // GET /agent/{id}/events?after=N — the same feed as plain JSON.
+        if method == "GET", segs.count == 3, segs[0] == "agent", segs[2] == "events" {
+            guard let agentOps else { respond(conn, "404 Not Found", json: nil); return }
+            let id = segs[1]
+            let after = Int(query["after"] ?? "") ?? -1
+            Task {
+                let events = await agentOps.eventsSince(id, after)
+                self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(events))
+            }
+            return
+        }
+
+        // POST /agent/{id}/stop — abort the run.
+        if method == "POST", segs.count == 3, segs[0] == "agent", segs[2] == "stop" {
+            guard let agentOps else { respond(conn, "404 Not Found", json: nil); return }
+            let id = segs[1]
+            Task {
+                let ok = await agentOps.stop(id)
+                self.respond(conn, ok ? "200 OK" : "404 Not Found", json: nil)
+            }
+            return
+        }
+
+        // POST /agent/{id}/decision — approve/skip an awaiting step.
+        if method == "POST", segs.count == 3, segs[0] == "agent", segs[2] == "decision" {
+            guard let agentOps else { respond(conn, "404 Not Found", json: nil); return }
+            guard let req = try? CompanionJSON.decoder.decode(CompanionAgentDecisionDTO.self, from: body) else {
+                respond(conn, "400 Bad Request", json: nil); return
+            }
+            let id = segs[1]
+            Task {
+                let ok = await agentOps.decision(id, req.seq, req.approve)
+                self.respond(conn, ok ? "200 OK" : "404 Not Found", json: nil)
             }
             return
         }
@@ -840,6 +930,39 @@ public final class CompanionServer: @unchecked Sendable {
             }
             self.queue.asyncAfter(deadline: .now() + 0.4) { [weak self] in
                 self?.pushLoop(conn, buildID: buildID, state: state)
+            }
+        }
+    }
+
+    /// WS /agent/{id}/events — the step feed, same poll-and-push shape as the
+    /// build-log stream: JSON text frames, one event per frame.
+    private func upgradeAndStreamAgent(_ conn: NWConnection, header: String, agentID: String) {
+        guard let key = headerValue(header, "sec-websocket-key") else { respond(conn, "400 Bad Request", json: nil); return }
+        let magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+        let accept = Data(Insecure.SHA1.hash(data: Data((key + magic).utf8))).base64EncodedString()
+        let handshake = "HTTP/1.1 101 Switching Protocols\r\n"
+            + "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            + "Sec-WebSocket-Accept: \(accept)\r\n\r\n"
+
+        let state = WSState()
+        conn.send(content: Data(handshake.utf8), completion: .contentProcessed { [weak self] _ in
+            guard let self else { return }
+            self.drainClient(conn, state: state)
+            self.pushAgentLoop(conn, agentID: agentID, state: state)
+        })
+    }
+
+    private func pushAgentLoop(_ conn: NWConnection, agentID: String, state: WSState) {
+        guard state.open, let agentOps else { conn.cancel(); return }
+        Task {
+            let events = await agentOps.eventsSince(agentID, state.lastSeq)
+            for event in events {
+                guard let data = try? CompanionJSON.encoder.encode(event) else { continue }
+                self.send(conn, payload: data)
+                state.lastSeq = max(state.lastSeq, event.seq)
+            }
+            self.queue.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.pushAgentLoop(conn, agentID: agentID, state: state)
             }
         }
     }
