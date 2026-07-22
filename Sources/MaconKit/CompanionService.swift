@@ -28,7 +28,7 @@ public final class CompanionService {
                 power: (@Sendable () async -> CompanionPowerDTO)? = nil,
                 wake: (@Sendable () async -> Void)? = nil,
                 unlock: (@Sendable () async -> Bool)? = nil,
-                privacy: (@Sendable () async -> Void)? = nil,
+                privacy: (@Sendable (_ on: Bool) async -> Bool)? = nil,
                 aiModels: (@Sendable () async -> Data?)? = nil,
                 aiChat: (@Sendable (_ body: Data, _ emit: @escaping @Sendable (Data) -> Void) async -> Void)? = nil,
                 codeOps: CompanionServer.CodeOps? = nil,

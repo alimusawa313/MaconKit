@@ -214,8 +214,9 @@ public final class CompanionServer: @unchecked Sendable {
     private let power: (@Sendable () async -> CompanionPowerDTO)?
     private let wake: (@Sendable () async -> Void)?
     private let unlock: (@Sendable () async -> Bool)?
-    /// Raise the Mac's privacy curtain (e.g. right after a remote unlock).
-    private let privacy: (@Sendable () async -> Void)?
+    /// Set the Mac's privacy curtain on/off (universal screen blocker); returns
+    /// whether it ended up raised.
+    private let privacy: (@Sendable (_ on: Bool) async -> Bool)?
     /// AI (local Ollama proxy). `aiModels` returns the encoded model list, or
     /// nil when the local model host is unreachable/disabled → 503. `aiChat`
     /// streams the reply: it forwards the request body to the local host and
@@ -254,7 +255,7 @@ public final class CompanionServer: @unchecked Sendable {
                 power: (@Sendable () async -> CompanionPowerDTO)? = nil,
                 wake: (@Sendable () async -> Void)? = nil,
                 unlock: (@Sendable () async -> Bool)? = nil,
-                privacy: (@Sendable () async -> Void)? = nil,
+                privacy: (@Sendable (_ on: Bool) async -> Bool)? = nil,
                 aiModels: (@Sendable () async -> Data?)? = nil,
                 aiChat: (@Sendable (_ body: Data, _ emit: @escaping @Sendable (Data) -> Void) async -> Void)? = nil,
                 codeOps: CodeOps? = nil,
@@ -579,10 +580,16 @@ public final class CompanionServer: @unchecked Sendable {
             return
         }
 
-        // POST /power/privacy — raise the Mac's privacy curtain.
+        // POST /power/privacy — set the privacy curtain. Body {"on": Bool}
+        // (default true); replies {"on": Bool} with the resulting state.
         if method == "POST", segs.count == 2, segs[0] == "power", segs[1] == "privacy" {
             guard let privacy else { respond(conn, "404 Not Found", json: nil); return }
-            Task { await privacy(); self.respond(conn, "200 OK", json: nil) }
+            struct Toggle: Decodable { var on: Bool? }
+            let on = (try? CompanionJSON.decoder.decode(Toggle.self, from: body))?.on ?? true
+            Task {
+                let result = await privacy(on)
+                self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(["on": result]))
+            }
             return
         }
 

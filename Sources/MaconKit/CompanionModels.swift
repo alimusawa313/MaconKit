@@ -191,11 +191,14 @@ public struct CompanionPowerDTO: Codable, Sendable {
     public var canUnlock: Bool         // remote unlock is allowed (password stored)
     public var mac: String?            // primary NIC MAC, for Wake-on-LAN
     public var broadcast: String?      // subnet broadcast address, for WoL
+    public var privacyUp: Bool         // the privacy curtain is currently raised
     public init(locked: Bool, displayAsleep: Bool, keepAwake: Bool,
-                canWake: Bool, canUnlock: Bool, mac: String?, broadcast: String?) {
+                canWake: Bool, canUnlock: Bool, mac: String?, broadcast: String?,
+                privacyUp: Bool = false) {
         self.locked = locked; self.displayAsleep = displayAsleep; self.keepAwake = keepAwake
         self.canWake = canWake; self.canUnlock = canUnlock
         self.mac = mac; self.broadcast = broadcast
+        self.privacyUp = privacyUp
     }
 }
 
