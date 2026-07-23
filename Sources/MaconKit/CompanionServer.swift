@@ -217,6 +217,8 @@ public final class CompanionServer: @unchecked Sendable {
     /// Set the Mac's privacy curtain on/off (universal screen blocker); returns
     /// whether it ended up raised.
     private let privacy: (@Sendable (_ on: Bool) async -> Bool)?
+    /// Lock the Mac's screen (login window). Returns whether it applied.
+    private let lock: (@Sendable () async -> Bool)?
     /// AI (local Ollama proxy). `aiModels` returns the encoded model list, or
     /// nil when the local model host is unreachable/disabled → 503. `aiChat`
     /// streams the reply: it forwards the request body to the local host and
@@ -256,6 +258,7 @@ public final class CompanionServer: @unchecked Sendable {
                 wake: (@Sendable () async -> Void)? = nil,
                 unlock: (@Sendable () async -> Bool)? = nil,
                 privacy: (@Sendable (_ on: Bool) async -> Bool)? = nil,
+                lock: (@Sendable () async -> Bool)? = nil,
                 aiModels: (@Sendable () async -> Data?)? = nil,
                 aiChat: (@Sendable (_ body: Data, _ emit: @escaping @Sendable (Data) -> Void) async -> Void)? = nil,
                 codeOps: CodeOps? = nil,
@@ -284,6 +287,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.wake = wake
         self.unlock = unlock
         self.privacy = privacy
+        self.lock = lock
         self.aiModels = aiModels
         self.aiChat = aiChat
         self.codeOps = codeOps
@@ -589,6 +593,16 @@ public final class CompanionServer: @unchecked Sendable {
             Task {
                 let result = await privacy(on)
                 self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(["on": result]))
+            }
+            return
+        }
+
+        // POST /power/lock — lock the Mac's screen.
+        if method == "POST", segs.count == 2, segs[0] == "power", segs[1] == "lock" {
+            guard let lock else { respond(conn, "404 Not Found", json: nil); return }
+            Task {
+                let ok = await lock()
+                self.respond(conn, ok ? "200 OK" : "409 Conflict", json: nil)
             }
             return
         }
