@@ -192,13 +192,15 @@ public struct CompanionPowerDTO: Codable, Sendable {
     public var mac: String?            // primary NIC MAC, for Wake-on-LAN
     public var broadcast: String?      // subnet broadcast address, for WoL
     public var privacyUp: Bool         // the privacy curtain is currently raised
+    public var onACPower: Bool         // running on AC power (lid-closed capture needs it)
     public init(locked: Bool, displayAsleep: Bool, keepAwake: Bool,
                 canWake: Bool, canUnlock: Bool, mac: String?, broadcast: String?,
-                privacyUp: Bool = false) {
+                privacyUp: Bool = false, onACPower: Bool = true) {
         self.locked = locked; self.displayAsleep = displayAsleep; self.keepAwake = keepAwake
         self.canWake = canWake; self.canUnlock = canUnlock
         self.mac = mac; self.broadcast = broadcast
         self.privacyUp = privacyUp
+        self.onACPower = onACPower
     }
 }
 
