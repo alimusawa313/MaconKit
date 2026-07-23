@@ -238,6 +238,9 @@ public final class CompanionServer: @unchecked Sendable {
     /// streams the reply: it forwards the request body to the local host and
     /// calls `emit` once per NDJSON line, which we relay to the client.
     private let aiModels: (@Sendable () async -> Data?)?
+    /// Custom (user-added) OpenAI-compatible providers this Mac offers — id,
+    /// name, and models (no keys), so a device can list them in its pickers.
+    private let aiProviders: (@Sendable () async -> Data?)?
     private let aiChat: (@Sendable (_ body: Data, _ emit: @escaping @Sendable (Data) -> Void) async -> Void)?
     private let codeOps: CodeOps?
     private let termOps: TermOps?
@@ -274,6 +277,7 @@ public final class CompanionServer: @unchecked Sendable {
                 privacy: (@Sendable (_ on: Bool) async -> Bool)? = nil,
                 lock: (@Sendable () async -> Bool)? = nil,
                 aiModels: (@Sendable () async -> Data?)? = nil,
+                aiProviders: (@Sendable () async -> Data?)? = nil,
                 aiChat: (@Sendable (_ body: Data, _ emit: @escaping @Sendable (Data) -> Void) async -> Void)? = nil,
                 codeOps: CodeOps? = nil,
                 termOps: TermOps? = nil,
@@ -303,6 +307,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.privacy = privacy
         self.lock = lock
         self.aiModels = aiModels
+        self.aiProviders = aiProviders
         self.aiChat = aiChat
         self.codeOps = codeOps
         self.termOps = termOps
@@ -638,6 +643,16 @@ public final class CompanionServer: @unchecked Sendable {
                 } else {
                     self.respond(conn, "503 Service Unavailable", json: nil)
                 }
+            }
+            return
+        }
+
+        // GET /ai/providers — custom OpenAI-compatible providers (no keys).
+        if method == "GET", path == "/ai/providers" {
+            guard let aiProviders else { respond(conn, "404 Not Found", json: nil); return }
+            Task {
+                if let data = await aiProviders() { self.respond(conn, "200 OK", json: data) }
+                else { self.respond(conn, "503 Service Unavailable", json: nil) }
             }
             return
         }

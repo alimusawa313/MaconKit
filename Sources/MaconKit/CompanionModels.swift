@@ -183,6 +183,22 @@ public struct CompanionCompactOpenResponseDTO: Codable, Sendable {
 
 /// `GET /power` — the Mac's reachability + wake/unlock state, so the device
 /// can wake it (Wake-on-LAN) and offer unlock.
+/// A custom (user-added) OpenAI-compatible provider, as advertised to devices.
+/// No key — the Mac holds it and runs the call.
+public struct CompanionAIProviderDTO: Codable, Sendable {
+    public var id: String
+    public var name: String
+    public var models: [String]
+    public init(id: String, name: String, models: [String]) {
+        self.id = id; self.name = name; self.models = models
+    }
+}
+
+public struct CompanionAIProvidersDTO: Codable, Sendable {
+    public var providers: [CompanionAIProviderDTO]
+    public init(providers: [CompanionAIProviderDTO]) { self.providers = providers }
+}
+
 public struct CompanionPowerDTO: Codable, Sendable {
     public var locked: Bool            // login/lock window is up
     public var displayAsleep: Bool     // the display has slept
