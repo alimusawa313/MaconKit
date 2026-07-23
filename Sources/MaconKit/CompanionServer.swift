@@ -253,6 +253,11 @@ public final class CompanionServer: @unchecked Sendable {
     private let apnsRegister: (@Sendable (_ bearer: String, _ body: Data) async -> Bool)?
     /// The dictate-to-drive Mac agent (nil disables the /agent routes).
     private let agentOps: AgentOps?
+    /// Live voice mode: one conversation turn → { say, task? }. Nil = 404.
+    private let voiceTurn: (@Sendable (CompanionVoiceTurnRequestDTO) async -> CompanionVoiceTurnResponseDTO?)?
+    /// Text → WAV speech (Piper on the Mac). Nil op = 404; nil Data = 503 and
+    /// the device falls back to its own voice.
+    private let voiceTTS: (@Sendable (String) async -> Data?)?
 
     private static let controlDecoder = JSONDecoder()
 
@@ -285,6 +290,8 @@ public final class CompanionServer: @unchecked Sendable {
                 devices: (@Sendable () async -> Data?)? = nil,
                 apnsRegister: (@Sendable (_ bearer: String, _ body: Data) async -> Bool)? = nil,
                 agentOps: AgentOps? = nil,
+                voiceTurn: (@Sendable (CompanionVoiceTurnRequestDTO) async -> CompanionVoiceTurnResponseDTO?)? = nil,
+                voiceTTS: (@Sendable (String) async -> Data?)? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8899
         self.authorize = authorize
@@ -315,6 +322,8 @@ public final class CompanionServer: @unchecked Sendable {
         self.devices = devices
         self.apnsRegister = apnsRegister
         self.agentOps = agentOps
+        self.voiceTurn = voiceTurn
+        self.voiceTTS = voiceTTS
         self.onLog = onLog
     }
 
@@ -675,6 +684,40 @@ public final class CompanionServer: @unchecked Sendable {
             return
         }
 
+        // POST /voice/turn — one live-voice conversation turn → { say, task? }.
+        if method == "POST", path == "/voice/turn" {
+            guard let voiceTurn else { respond(conn, "404 Not Found", json: nil); return }
+            guard let req = try? CompanionJSON.decoder.decode(CompanionVoiceTurnRequestDTO.self, from: body) else {
+                respond(conn, "400 Bad Request", json: nil); return
+            }
+            Task {
+                if let resp = await voiceTurn(req) {
+                    self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(resp))
+                } else {
+                    self.respond(conn, "503 Service Unavailable", json: nil)
+                }
+            }
+            return
+        }
+
+        // POST /voice/tts — synthesize a reply → WAV (503 = no TTS on the Mac,
+        // the device speaks with its own voice instead).
+        if method == "POST", path == "/voice/tts" {
+            guard let voiceTTS else { respond(conn, "404 Not Found", json: nil); return }
+            guard let req = try? CompanionJSON.decoder.decode(CompanionVoiceTTSRequestDTO.self, from: body),
+                  !req.text.isEmpty else {
+                respond(conn, "400 Bad Request", json: nil); return
+            }
+            Task {
+                if let wav = await voiceTTS(req.text) {
+                    self.respondData(conn, "200 OK", contentType: "audio/wav", data: wav)
+                } else {
+                    self.respond(conn, "503 Service Unavailable", json: nil)
+                }
+            }
+            return
+        }
+
         // WS /term?cwd= — a live shell (PTY) on the Mac for the Code terminal.
         if method == "GET", path == "/term",
            headerValue(header, "upgrade")?.lowercased() == "websocket" {
@@ -929,6 +972,15 @@ public final class CompanionServer: @unchecked Sendable {
         conn.send(content: Data(head.utf8) + payload, completion: .contentProcessed { _ in
             conn.cancel()
         })
+    }
+
+    /// A binary response (e.g. synthesized speech).
+    private func respondData(_ conn: NWConnection, _ status: String, contentType: String, data: Data) {
+        var head = "HTTP/1.1 \(status)\r\n"
+        head += "Content-Type: \(contentType)\r\n"
+        head += "Content-Length: \(data.count)\r\n"
+        head += "Connection: close\r\n\r\n"
+        conn.send(content: Data(head.utf8) + data, completion: .contentProcessed { _ in conn.cancel() })
     }
 
     private func respond(_ conn: NWConnection, _ status: String, json: Data?) {

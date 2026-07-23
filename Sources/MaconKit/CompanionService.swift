@@ -39,6 +39,8 @@ public final class CompanionService {
                 devices: (@Sendable () async -> Data?)? = nil,
                 apnsRegister: (@Sendable (_ bearer: String, _ body: Data) async -> Bool)? = nil,
                 agentOps: CompanionServer.AgentOps? = nil,
+                voiceTurn: (@Sendable (CompanionVoiceTurnRequestDTO) async -> CompanionVoiceTurnResponseDTO?)? = nil,
+                voiceTTS: (@Sendable (String) async -> Data?)? = nil,
                 onAuthorize: (@Sendable (String) -> Void)? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.store = store
@@ -99,6 +101,8 @@ public final class CompanionService {
             devices: devices,
             apnsRegister: apnsRegister,
             agentOps: agentOps,
+            voiceTurn: voiceTurn,
+            voiceTTS: voiceTTS,
             onLog: onLog)
     }
 
