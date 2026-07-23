@@ -20,6 +20,7 @@
 //    POST /pipelines/{id}/watch|unwatch|run  (Bearer)  runner controls
 //    GET  /windows              (Bearer)   open Mac windows (CompactOS picker)
 //    POST /compact/open         (Bearer)   open/fit an app window for CompactOS
+//    POST /screen/claim         (Bearer)   move the screen session to this device
 //    POST /agent/task           (Bearer)   dictate a task; the Mac drives itself
 //    WS   /agent/{id}/events    (Bearer)   agent step feed (JSON text frames)
 //    POST /agent/{id}/stop      (Bearer)   abort an agent run
@@ -196,6 +197,19 @@ public final class CompanionServer: @unchecked Sendable {
     /// Optional H.264 screen streaming. Nil disables the /screen route (e.g. the
     /// headless CLI, which has no display to capture).
     private let screen: ScreenBroadcaster?
+
+    /// Live screen viewers, so we can report how many devices are watching and
+    /// "move" the session — evict the others so one device has it alone.
+    private final class ScreenViewer {
+        weak var conn: NWConnection?
+        let token: String
+        let state: WSState
+        init(conn: NWConnection, token: String, state: WSState) {
+            self.conn = conn; self.token = token; self.state = state
+        }
+    }
+    private let screenLock = NSLock()
+    private var screenViewers: [ObjectIdentifier: ScreenViewer] = [:]
     /// Optional remote-control sink. Nil disables the /control route.
     private let control: (@Sendable (ControlEvent) -> Void)?
     /// Optional installed-app catalog (the app supplies one with icons). Falls
@@ -434,6 +448,14 @@ public final class CompanionServer: @unchecked Sendable {
             guard screen != nil else { respond(conn, "404 Not Found", json: nil); return }
             screenTarget?(query["window"].flatMap { UInt32($0) })
             upgradeAndStreamScreen(conn, header: header); return
+        }
+
+        // POST /screen/claim — "move screen here": this device becomes the sole
+        // viewer; the others watching are evicted.
+        if method == "POST", segs.count == 2, segs[0] == "screen", segs[1] == "claim" {
+            guard screen != nil else { respond(conn, "404 Not Found", json: nil); return }
+            claimScreen(for: token)
+            respond(conn, "200 OK", json: nil); return
         }
 
         // WS /control — remote input events, iPad → Mac
@@ -1015,12 +1037,20 @@ public final class CompanionServer: @unchecked Sendable {
             + "Sec-WebSocket-Accept: \(accept)\r\n\r\n"
 
         let id = ObjectIdentifier(conn)
+        let token = bearer(header) ?? ""
         let state = WSState()
-        state.onClose = { broadcaster.removeViewer(id) }
+        state.onClose = { [weak self] in
+            broadcaster.removeViewer(id)
+            guard let self else { return }
+            self.screenLock.lock(); self.screenViewers[id] = nil; self.screenLock.unlock()
+            self.broadcastScreenCount()
+        }
+        screenLock.lock(); screenViewers[id] = ScreenViewer(conn: conn, token: token, state: state); screenLock.unlock()
 
         conn.send(content: Data(handshake.utf8), completion: .contentProcessed { [weak self] _ in
             guard let self else { return }
             self.drainClient(conn, state: state)
+            self.broadcastScreenCount()
             // Frames go straight from the encoder thread to conn.send (thread-
             // safe) — never through the server's shared queue, which also
             // carries control traffic and would stall the 60fps cadence.
@@ -1072,6 +1102,37 @@ public final class CompanionServer: @unchecked Sendable {
                 })
             }
         })
+    }
+
+    /// Tell every screen viewer how many devices are currently watching, as a
+    /// JSON text frame `{"viewers": N}` — the client shows a "Move screen here"
+    /// affordance when that's ≥ 2.
+    private func broadcastScreenCount() {
+        screenLock.lock(); let viewers = Array(screenViewers.values); screenLock.unlock()
+        guard let json = try? JSONSerialization.data(withJSONObject: ["viewers": viewers.count]) else { return }
+        for v in viewers {
+            guard let conn = v.conn, v.state.open else { continue }
+            send(conn, payload: json, opcode: 0x81)
+        }
+    }
+
+    /// "Move screen here": the caller's device becomes the sole viewer by
+    /// evicting the others (they get an `{"evicted": true}` frame, then close).
+    private func claimScreen(for token: String) {
+        screenLock.lock()
+        let others = screenViewers.filter { $0.value.token != token }
+        for id in others.keys { screenViewers[id] = nil }
+        screenLock.unlock()
+
+        guard let bye = try? JSONSerialization.data(withJSONObject: ["evicted": true]) else { return }
+        for (id, v) in others {
+            screen?.removeViewer(id)
+            guard let conn = v.conn else { continue }
+            send(conn, payload: bye, opcode: 0x81)
+            v.state.open = false
+            queue.asyncAfter(deadline: .now() + 0.15) { conn.cancel() }   // let the frame flush
+        }
+        broadcastScreenCount()
     }
 
     // MARK: Terminal (bidirectional)
