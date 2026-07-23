@@ -1272,7 +1272,13 @@ public final class CompanionServer: @unchecked Sendable {
             var acc = buffer
             if let data, !data.isEmpty { acc.append(data) }
             let leftover = self.parseControlFrames(acc, conn: conn)
-            if isComplete || error != nil { conn.cancel(); return }
+            if isComplete || error != nil {
+                // The socket dropped mid-session (app backgrounded, network
+                // blip). Any modifier the device was holding would stay held
+                // forever — release everything.
+                self.control?(ControlEvent(t: "keyreset"))
+                conn.cancel(); return
+            }
             self.readControl(conn, buffer: leftover)
         }
     }
@@ -1306,7 +1312,9 @@ public final class CompanionServer: @unchecked Sendable {
             off += total
 
             switch opcode {
-            case 0x8: conn.cancel(); return Data()                       // close
+            case 0x8:                                                     // close
+                control?(ControlEvent(t: "keyreset"))                     // drop held modifiers
+                conn.cancel(); return Data()
             case 0x1, 0x2:                                                // text / binary
                 if let event = try? Self.controlDecoder.decode(ControlEvent.self, from: Data(payload)) {
                     control?(event)
