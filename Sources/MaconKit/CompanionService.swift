@@ -41,6 +41,9 @@ public final class CompanionService {
                 agentOps: CompanionServer.AgentOps? = nil,
                 voiceTurn: (@Sendable (CompanionVoiceTurnRequestDTO) async -> CompanionVoiceTurnResponseDTO?)? = nil,
                 voiceTTS: (@Sendable (String) async -> Data?)? = nil,
+                audio: AudioBroadcaster? = nil,
+                micOps: CompanionServer.MicOps? = nil,
+                audioStatus: (@Sendable () async -> Data?)? = nil,
                 onAuthorize: (@Sendable (String) -> Void)? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.store = store
@@ -103,6 +106,9 @@ public final class CompanionService {
             agentOps: agentOps,
             voiceTurn: voiceTurn,
             voiceTTS: voiceTTS,
+            audio: audio,
+            micOps: micOps,
+            audioStatus: audioStatus,
             onLog: onLog)
     }
 

@@ -26,6 +26,9 @@
 //    POST /agent/{id}/stop      (Bearer)   abort an agent run
 //    POST /agent/{id}/decision  (Bearer)   approve/skip an awaiting agent step
 //    WS   /screen?window={id}   (Bearer)   stream one window instead of the display
+//    WS   /audio                (Bearer)   encoded Mac system audio → device
+//    WS   /mic                  (Bearer)   encoded device microphone → Mac
+//    GET  /audio/status         (Bearer)   driver + consent state for media I/O
 //
 //  Meant to sit behind a cloudflared tunnel (which terminates TLS), so a
 //  headless EC2 Mac is reachable at a stable https/wss URL.
@@ -171,6 +174,22 @@ public final class CompanionServer: @unchecked Sendable {
         }
     }
 
+    /// The remote-microphone uplink (nil = the /mic route 404s). One live
+    /// source at a time — a new connection evicts the previous one, matching
+    /// the screen's last-device-wins semantics.
+    public struct MicOps: Sendable {
+        /// A companion mic went live / the last one left. What flips the Mac's
+        /// default input onto the virtual microphone and back.
+        public var onActive: @Sendable (Bool) -> Void
+        /// One encoded audio packet from the device (AudioPacket wire format).
+        public var packet: @Sendable (Data) -> Void
+
+        public init(onActive: @escaping @Sendable (Bool) -> Void,
+                    packet: @escaping @Sendable (Data) -> Void) {
+            self.onActive = onActive; self.packet = packet
+        }
+    }
+
     /// One inbound terminal frame: keystrokes (base64) or a resize.
     private struct TermInbound: Decodable {
         let t: String            // "in" | "size"
@@ -258,6 +277,16 @@ public final class CompanionServer: @unchecked Sendable {
     /// Text → WAV speech (Piper on the Mac). Nil op = 404; nil Data = 503 and
     /// the device falls back to its own voice.
     private let voiceTTS: (@Sendable (String) async -> Data?)?
+    /// Encoded Mac-audio downlink (nil disables the /audio route).
+    private let audio: AudioBroadcaster?
+    /// Remote-microphone uplink (nil disables the /mic route).
+    private let micOps: MicOps?
+    /// Encoded CompanionAudioStatusDTO for GET /audio/status (nil = 404).
+    private let audioStatus: (@Sendable () async -> Data?)?
+    /// The live /mic connection, so a new source can evict it (last wins).
+    private let micLock = NSLock()
+    private var micConn: NWConnection?
+    private var micState: WSState?
 
     private static let controlDecoder = JSONDecoder()
 
@@ -292,6 +321,9 @@ public final class CompanionServer: @unchecked Sendable {
                 agentOps: AgentOps? = nil,
                 voiceTurn: (@Sendable (CompanionVoiceTurnRequestDTO) async -> CompanionVoiceTurnResponseDTO?)? = nil,
                 voiceTTS: (@Sendable (String) async -> Data?)? = nil,
+                audio: AudioBroadcaster? = nil,
+                micOps: MicOps? = nil,
+                audioStatus: (@Sendable () async -> Data?)? = nil,
                 onLog: @escaping @Sendable (String) -> Void) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8899
         self.authorize = authorize
@@ -324,6 +356,9 @@ public final class CompanionServer: @unchecked Sendable {
         self.agentOps = agentOps
         self.voiceTurn = voiceTurn
         self.voiceTTS = voiceTTS
+        self.audio = audio
+        self.micOps = micOps
+        self.audioStatus = audioStatus
         self.onLog = onLog
     }
 
@@ -477,6 +512,28 @@ public final class CompanionServer: @unchecked Sendable {
            headerValue(header, "upgrade")?.lowercased() == "websocket" {
             guard control != nil else { respond(conn, "404 Not Found", json: nil); return }
             upgradeAndControl(conn, header: header); return
+        }
+
+        // WS /audio — encoded Mac system audio, Mac → device ("hear Mac here").
+        if method == "GET", path == "/audio",
+           headerValue(header, "upgrade")?.lowercased() == "websocket" {
+            guard audio != nil else { respond(conn, "404 Not Found", json: nil); return }
+            upgradeAndStreamAudio(conn, header: header); return
+        }
+
+        // WS /mic — encoded device microphone, device → Mac ("talk to Mac").
+        if method == "GET", path == "/mic",
+           headerValue(header, "upgrade")?.lowercased() == "websocket" {
+            guard micOps != nil else { respond(conn, "404 Not Found", json: nil); return }
+            upgradeAndMic(conn, header: header); return
+        }
+
+        // GET /audio/status — driver + consent state behind the media-I/O
+        // toggles, so the device can hint "install the driver" vs "sharing off".
+        if method == "GET", path == "/audio/status" {
+            guard let audioStatus else { respond(conn, "404 Not Found", json: nil); return }
+            Task { self.respond(conn, "200 OK", json: await audioStatus()) }
+            return
         }
 
         // GET /apps — installed Mac apps for the shortcut deck (control-only).
@@ -1200,6 +1257,120 @@ public final class CompanionServer: @unchecked Sendable {
             queue.asyncAfter(deadline: .now() + 0.15) { conn.cancel() }   // let the frame flush
         }
         broadcastScreenCount()
+    }
+
+    // MARK: Audio streaming
+
+    /// Upgrade to WebSocket and push encoded audio packets from the broadcaster.
+    /// Same shape as the screen path with a much smaller in-flight budget and no
+    /// keyframe dance — every AAC packet decodes on its own, so when the link
+    /// clogs we just drop packets (a 21 ms blip) until it drains.
+    private func upgradeAndStreamAudio(_ conn: NWConnection, header: String) {
+        guard let broadcaster = audio else { respond(conn, "404 Not Found", json: nil); return }
+        guard let key = headerValue(header, "sec-websocket-key") else { respond(conn, "400 Bad Request", json: nil); return }
+        let magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+        let accept = Data(Insecure.SHA1.hash(data: Data((key + magic).utf8))).base64EncodedString()
+        let handshake = "HTTP/1.1 101 Switching Protocols\r\n"
+            + "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            + "Sec-WebSocket-Accept: \(accept)\r\n\r\n"
+
+        let id = ObjectIdentifier(conn)
+        let state = WSState()
+        state.onClose = { broadcaster.removeListener(id) }
+
+        conn.send(content: Data(handshake.utf8), completion: .contentProcessed { [weak self] _ in
+            guard let self else { return }
+            self.drainClient(conn, state: state)
+            // ~64 kbps stream: 64 KB in flight ≈ 8 s of audio — hit only when
+            // the transport truly stalls, at which point dropping is right.
+            let budget = 64 * 1024
+            broadcaster.addListener(id) { [weak conn] packet in
+                guard let conn, state.open else { return }
+                state.sendLock.lock()
+                if state.inflightBytes > budget {
+                    state.sendLock.unlock()
+                    return                              // drop; decoder rides through
+                }
+                state.inflightBytes += packet.count
+                state.sendLock.unlock()
+
+                var frame = Data([0x82])
+                let n = packet.count
+                if n < 126 {
+                    frame.append(UInt8(n))
+                } else if n <= 0xFFFF {
+                    frame.append(126); frame.append(UInt8(n >> 8)); frame.append(UInt8(n & 0xFF))
+                } else {
+                    frame.append(127)
+                    for shift in stride(from: 56, through: 0, by: -8) { frame.append(UInt8((n >> shift) & 0xFF)) }
+                }
+                frame.append(packet)
+                conn.send(content: frame, completion: .contentProcessed { _ in
+                    state.sendLock.lock(); state.inflightBytes -= packet.count; state.sendLock.unlock()
+                })
+            }
+        })
+    }
+
+    // MARK: Remote microphone (inbound)
+
+    /// Upgrade to WebSocket and feed inbound encoded mic packets to the app.
+    /// One live source: a second device taking the mic evicts the first, the
+    /// same last-device-wins rule as the screen session.
+    private func upgradeAndMic(_ conn: NWConnection, header: String) {
+        guard let ops = micOps else { respond(conn, "404 Not Found", json: nil); return }
+        guard let key = headerValue(header, "sec-websocket-key") else { respond(conn, "400 Bad Request", json: nil); return }
+        let magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+        let accept = Data(Insecure.SHA1.hash(data: Data((key + magic).utf8))).base64EncodedString()
+        let handshake = "HTTP/1.1 101 Switching Protocols\r\n"
+            + "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: \(accept)\r\n\r\n"
+
+        let state = WSState()
+
+        // Evict the previous source (if any) and become the live one.
+        micLock.lock()
+        let evictedConn = micConn
+        let evictedState = micState
+        let hadSource = micConn != nil
+        micConn = conn
+        micState = state
+        micLock.unlock()
+        if let evictedState { evictedState.open = false }
+        evictedConn?.cancel()
+
+        state.onClose = { [weak self, weak conn] in
+            guard let self else { return }
+            self.micLock.lock()
+            // Only deactivate if WE are still the live source (not evicted).
+            let isCurrent = self.micConn === conn
+            if isCurrent { self.micConn = nil; self.micState = nil }
+            self.micLock.unlock()
+            if isCurrent { ops.onActive(false) }
+        }
+
+        conn.send(content: Data(handshake.utf8), completion: .contentProcessed { [weak self] _ in
+            guard let self else { return }
+            if !hadSource { ops.onActive(true) }
+            self.readMic(conn, buffer: Data(), state: state, ops: ops)
+        })
+    }
+
+    private func readMic(_ conn: NWConnection, buffer: Data, state: WSState, ops: MicOps) {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
+            guard let self else { conn.cancel(); return }
+            var acc = buffer
+            if let data, !data.isEmpty { acc.append(data) }
+            let leftover = self.parseFrames(acc, conn: conn) { payload in
+                guard state.open else { return }
+                ops.packet(payload)
+            }
+            if isComplete || error != nil || !state.open {
+                state.open = false
+                state.onClose?(); state.onClose = nil
+                conn.cancel(); return
+            }
+            self.readMic(conn, buffer: leftover, state: state, ops: ops)
+        }
     }
 
     // MARK: Terminal (bidirectional)
