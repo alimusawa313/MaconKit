@@ -364,40 +364,84 @@ public final class CompanionServer: @unchecked Sendable {
 
     // MARK: Lifecycle
 
+    /// start() was called and stop() hasn't been — bind failures keep retrying
+    /// while this holds. (Touched only on `queue`.)
+    private var shouldRun = false
+    /// Log the "port busy, waiting" line once per wait, not every 3 s.
+    private var loggedWaiting = false
+
     public func start() {
         queue.async { [self] in
-            guard listener == nil else { return }
-            // Latency-tuned TCP: no Nagle batching, and QoS-tagged as
-            // interactive video so Wi-Fi (WMM) prioritizes our packets.
-            let tcp = NWProtocolTCP.Options()
-            tcp.noDelay = true
-            // Detect a dead peer promptly. Without this, a companion that
-            // vanishes uncleanly (app killed, Wi-Fi dropped, Mac slept) leaves
-            // its socket "open" — and a live /screen viewer keeps the capture +
-            // H.264 encoder running full-tilt to nobody, pinning the CPU. With
-            // keepalive the OS errors the connection in ~20s, so drainClient
-            // removes the viewer and capture stops on its own.
-            tcp.enableKeepalive = true
-            tcp.keepaliveIdle = 10          // start probing after 10s idle
-            tcp.keepaliveInterval = 5       // probe every 5s
-            tcp.keepaliveCount = 2          // give up after 2 misses (~20s)
-            let params = NWParameters(tls: nil, tcp: tcp)
-            params.allowLocalEndpointReuse = true
-            params.serviceClass = .interactiveVideo
-            do {
-                let l = try NWListener(using: params, on: port)
-                l.newConnectionHandler = { [weak self] conn in self?.accept(conn) }
-                l.start(queue: queue)
-                listener = l
-                onLog("📡 Companion server listening on :\(port.rawValue)")
-            } catch {
-                onLog("✗ Companion couldn't bind port \(port.rawValue): \(error.localizedDescription)")
-            }
+            guard !shouldRun else { return }
+            shouldRun = true
+            loggedWaiting = false
+            bind()
         }
     }
 
+    /// One bind attempt. A busy port (e.g. an older app instance still holding
+    /// it during an update) is NOT fatal: NWListener reports it asynchronously
+    /// through the state handler, so we watch for `.failed`, release, and try
+    /// again every few seconds — the moment the old instance quits, this one
+    /// takes over and paired devices reconnect on their own.
+    private func bind() {
+        guard shouldRun, listener == nil else { return }
+        // Latency-tuned TCP: no Nagle batching, and QoS-tagged as
+        // interactive video so Wi-Fi (WMM) prioritizes our packets.
+        let tcp = NWProtocolTCP.Options()
+        tcp.noDelay = true
+        // Detect a dead peer promptly. Without this, a companion that
+        // vanishes uncleanly (app killed, Wi-Fi dropped, Mac slept) leaves
+        // its socket "open" — and a live /screen viewer keeps the capture +
+        // H.264 encoder running full-tilt to nobody, pinning the CPU. With
+        // keepalive the OS errors the connection in ~20s, so drainClient
+        // removes the viewer and capture stops on its own.
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 10          // start probing after 10s idle
+        tcp.keepaliveInterval = 5       // probe every 5s
+        tcp.keepaliveCount = 2          // give up after 2 misses (~20s)
+        let params = NWParameters(tls: nil, tcp: tcp)
+        params.allowLocalEndpointReuse = true
+        params.serviceClass = .interactiveVideo
+        do {
+            let l = try NWListener(using: params, on: port)
+            l.newConnectionHandler = { [weak self] conn in self?.accept(conn) }
+            l.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case .ready:
+                    self.loggedWaiting = false
+                    self.onLog("📡 Companion server listening on :\(self.port.rawValue)")
+                case .failed:
+                    if !self.loggedWaiting {
+                        self.loggedWaiting = true
+                        self.onLog("✗ Port \(self.port.rawValue) is busy (another MacON still running?) — waiting for it…")
+                    }
+                    self.listener?.cancel()
+                    self.listener = nil
+                    self.scheduleRebind()
+                default:
+                    break
+                }
+            }
+            l.start(queue: queue)
+            listener = l
+        } catch {
+            onLog("✗ Companion couldn't bind port \(port.rawValue): \(error.localizedDescription)")
+            scheduleRebind()
+        }
+    }
+
+    private func scheduleRebind() {
+        queue.asyncAfter(deadline: .now() + 3) { [weak self] in self?.bind() }
+    }
+
     public func stop() {
-        queue.async { [self] in listener?.cancel(); listener = nil }
+        queue.async { [self] in
+            shouldRun = false                 // also parks any pending rebind
+            listener?.cancel()
+            listener = nil
+        }
     }
 
     // MARK: Request lifecycle
