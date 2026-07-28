@@ -242,6 +242,10 @@ public final class CompanionServer: @unchecked Sendable {
     /// CompactOS: point the screen stream at one window (nil = whole display).
     /// Called on every /screen connect — last viewer wins.
     private let screenTarget: (@Sendable (UInt32?) -> Void)?
+    /// The viewer's screen size in pixels (`?fit=WxH`), so the Mac can shape
+    /// its virtual display to the device and the stream fills it edge to
+    /// edge. (0, 0) = viewer sent no size. Last viewer wins, like the target.
+    private let screenFit: (@Sendable (UInt32, UInt32) -> Void)?
     /// Power: reachability/wake/unlock. `power` reports state; `wake` lights the
     /// display; `unlock` types the stored password (returns whether it applied).
     private let power: (@Sendable () async -> CompanionPowerDTO)?
@@ -305,6 +309,7 @@ public final class CompanionServer: @unchecked Sendable {
                 windows: (@Sendable () async -> CompanionWindowsDTO)? = nil,
                 compactOpen: (@Sendable (CompanionCompactOpenRequestDTO) async -> CompanionCompactOpenResponseDTO?)? = nil,
                 screenTarget: (@Sendable (UInt32?) -> Void)? = nil,
+                screenFit: (@Sendable (UInt32, UInt32) -> Void)? = nil,
                 power: (@Sendable () async -> CompanionPowerDTO)? = nil,
                 wake: (@Sendable () async -> Void)? = nil,
                 unlock: (@Sendable () async -> Bool)? = nil,
@@ -340,6 +345,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.windows = windows
         self.compactOpen = compactOpen
         self.screenTarget = screenTarget
+        self.screenFit = screenFit
         self.power = power
         self.wake = wake
         self.unlock = unlock
@@ -535,11 +541,15 @@ public final class CompanionServer: @unchecked Sendable {
 
         // WS /screen — live H.264 screen stream (only if a source is wired up).
         // ?window={id} points the capture at one window (CompactOS); no param
-        // reverts to the whole display. One capture pipeline — last viewer wins.
+        // reverts to the whole display. ?fit=WxH is the device's screen in
+        // pixels, so the Mac can shape its virtual display to the device.
+        // One capture pipeline — last viewer wins.
         if method == "GET", path == "/screen",
            headerValue(header, "upgrade")?.lowercased() == "websocket" {
             guard screen != nil else { respond(conn, "404 Not Found", json: nil); return }
             screenTarget?(query["window"].flatMap { UInt32($0) })
+            let fit = query["fit"]?.split(separator: "x").compactMap { UInt32($0) } ?? []
+            screenFit?(fit.count == 2 ? fit[0] : 0, fit.count == 2 ? fit[1] : 0)
             upgradeAndStreamScreen(conn, header: header); return
         }
 
