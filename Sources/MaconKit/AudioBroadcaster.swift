@@ -91,14 +91,19 @@ public struct CompanionAudioStatusDTO: Codable, Sendable {
     public var listeners: Int
     /// A companion mic is currently live as the Mac's input.
     public var micLive: Bool
+    /// Peak |sample| the downlink capture has seen recently (0…1). A diagnostic:
+    /// >0 means real audio is reaching the encoder; 0 while something plays
+    /// means the capture/loopback is silent.
+    public var capturePeak: Double
 
     public init(driverActive: Bool, audioAllowed: Bool, micAllowed: Bool,
-                mode: String, listeners: Int, micLive: Bool) {
+                mode: String, listeners: Int, micLive: Bool, capturePeak: Double = 0) {
         self.driverActive = driverActive
         self.audioAllowed = audioAllowed
         self.micAllowed = micAllowed
         self.mode = mode
         self.listeners = listeners
         self.micLive = micLive
+        self.capturePeak = capturePeak
     }
 }
