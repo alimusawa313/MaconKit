@@ -1275,8 +1275,17 @@ public final class CompanionServer: @unchecked Sendable {
                     for shift in stride(from: 56, through: 0, by: -8) { frame.append(UInt8((n >> shift) & 0xFF)) }
                 }
                 frame.append(packet)
-                conn.send(content: frame, completion: .contentProcessed { _ in
+                conn.send(content: frame, completion: .contentProcessed { error in
                     state.sendLock.lock(); state.inflightBytes -= packet.count; state.sendLock.unlock()
+                    // A dead peer (slept Mac's old socket, vanished Wi-Fi)
+                    // errors here long before keepalive notices — reap it NOW,
+                    // or the corpse keeps occupying the viewer list and the
+                    // next reconnect never triggers a capture (re)start.
+                    if error != nil, state.open {
+                        state.open = false
+                        state.onClose?(); state.onClose = nil
+                        conn.cancel()
+                    }
                 })
             }
         })
@@ -1359,8 +1368,15 @@ public final class CompanionServer: @unchecked Sendable {
                     for shift in stride(from: 56, through: 0, by: -8) { frame.append(UInt8((n >> shift) & 0xFF)) }
                 }
                 frame.append(packet)
-                conn.send(content: frame, completion: .contentProcessed { _ in
+                conn.send(content: frame, completion: .contentProcessed { error in
                     state.sendLock.lock(); state.inflightBytes -= packet.count; state.sendLock.unlock()
+                    // Same dead-peer reaping as the screen path: a zombie
+                    // listener would pin capture on and block the restart.
+                    if error != nil, state.open {
+                        state.open = false
+                        state.onClose?(); state.onClose = nil
+                        conn.cancel()
+                    }
                 })
             }
         })
