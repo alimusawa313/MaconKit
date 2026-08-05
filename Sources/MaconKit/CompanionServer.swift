@@ -212,6 +212,10 @@ public final class CompanionServer: @unchecked Sendable {
     /// Prometheus text for GET /metrics (nil disables the route).
     private let metrics: (@Sendable () async -> String)?
     private let onLog: @Sendable (String) -> Void
+    /// Fires with whether the socket is actually bound. A busy port is not
+    /// fatal here — we retry forever — but the app needs to be able to say so
+    /// rather than claim it's serving when nothing is listening.
+    private let onListening: @Sendable (Bool) -> Void
 
     /// Optional H.264 screen streaming. Nil disables the /screen route (e.g. the
     /// headless CLI, which has no display to capture).
@@ -329,7 +333,8 @@ public final class CompanionServer: @unchecked Sendable {
                 audio: AudioBroadcaster? = nil,
                 micOps: MicOps? = nil,
                 audioStatus: (@Sendable () async -> Data?)? = nil,
-                onLog: @escaping @Sendable (String) -> Void) {
+                onLog: @escaping @Sendable (String) -> Void,
+                onListening: @escaping @Sendable (Bool) -> Void = { _ in }) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8899
         self.authorize = authorize
         self.pair = pair
@@ -366,6 +371,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.micOps = micOps
         self.audioStatus = audioStatus
         self.onLog = onLog
+        self.onListening = onListening
     }
 
     // MARK: Lifecycle
@@ -418,6 +424,7 @@ public final class CompanionServer: @unchecked Sendable {
                 case .ready:
                     self.loggedWaiting = false
                     self.onLog("📡 Companion server listening on :\(self.port.rawValue)")
+                    self.onListening(true)
                 case .failed:
                     if !self.loggedWaiting {
                         self.loggedWaiting = true
@@ -425,6 +432,7 @@ public final class CompanionServer: @unchecked Sendable {
                     }
                     self.listener?.cancel()
                     self.listener = nil
+                    self.onListening(false)
                     self.scheduleRebind()
                 default:
                     break
@@ -434,6 +442,7 @@ public final class CompanionServer: @unchecked Sendable {
             listener = l
         } catch {
             onLog("✗ Companion couldn't bind port \(port.rawValue): \(error.localizedDescription)")
+            onListening(false)
             scheduleRebind()
         }
     }
@@ -447,6 +456,7 @@ public final class CompanionServer: @unchecked Sendable {
             shouldRun = false                 // also parks any pending rebind
             listener?.cancel()
             listener = nil
+            onListening(false)
         }
     }
 

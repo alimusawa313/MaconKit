@@ -46,7 +46,8 @@ public final class CompanionService {
                 micOps: CompanionServer.MicOps? = nil,
                 audioStatus: (@Sendable () async -> Data?)? = nil,
                 onAuthorize: (@Sendable (String) -> Void)? = nil,
-                onLog: @escaping @Sendable (String) -> Void) {
+                onLog: @escaping @Sendable (String) -> Void,
+                onListening: @escaping @Sendable (Bool) -> Void = { _ in }) {
         self.store = store
         let data = CompanionData(runners: runners, runnerName: runnerName, pool: pool)
 
@@ -111,7 +112,8 @@ public final class CompanionService {
             audio: audio,
             micOps: micOps,
             audioStatus: audioStatus,
-            onLog: onLog)
+            onLog: onLog,
+            onListening: onListening)
     }
 
     public func start() { server.start() }
