@@ -1,0 +1,108 @@
+name: Release
+
+# A tag lands here (pushed by the app repo's publish workflow, or by hand) →
+# verify the build on a real Mac, then point the Homebrew tap at this tag.
+#
+# Needs a repo secret TAP_DEPLOY_KEY: the private half of a write-enabled deploy
+# key on alimusawa313/homebrew-macon. A deploy key rather than a PAT because it
+# can only reach the tap — a leaked PAT would reach every repo the account owns.
+#
+# The macOS verify job lives here rather than in the app's repo on purpose —
+# this repo is public, so its Actions minutes are free, and a green run here is
+# the thing anyone installing the CLI can check for themselves.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build release
+        run: swift build --disable-sandbox -c release
+      - name: Smoke test
+        run: .build/release/macon version
+
+  update-tap:
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute tarball URL + sha256
+        id: meta
+        run: |
+          set -euo pipefail
+          URL="https://github.com/${{ github.repository }}/archive/refs/tags/${{ github.ref_name }}.tar.gz"
+          # To a file, not a pipe — a 404 or an empty body has to fail the job.
+          for attempt in 1 2 3 4 5; do
+            if curl -fSL "$URL" -o source.tar.gz && test -s source.tar.gz; then break; fi
+            echo "tarball not ready yet (attempt $attempt), waiting…"
+            sleep 10
+          done
+          test -s source.tar.gz
+          SHA=$(sha256sum source.tar.gz | awk '{print $1}')
+          {
+            echo "url=$URL"
+            echo "sha=$SHA"
+            echo "version=${GITHUB_REF_NAME#v}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Authorise the deploy key
+        env:
+          KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$KEY" || { echo "::error::TAP_DEPLOY_KEY is not set"; exit 1; }
+          mkdir -p ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Checkout the tap
+        run: |
+          set -euo pipefail
+          git clone "git@github.com:${{ github.repository_owner }}/homebrew-macon.git" tap
+
+      - name: Write formula
+        run: |
+          mkdir -p tap/Formula
+          cat > tap/Formula/macon.rb <<EOF
+          class Macon < Formula
+            desc "Local CI runner — runs macon.yml pipelines on your Mac"
+            homepage "https://github.com/${{ github.repository }}"
+            url "${{ steps.meta.outputs.url }}"
+            sha256 "${{ steps.meta.outputs.sha }}"
+            version "${{ steps.meta.outputs.version }}"
+            license "MIT"
+
+            depends_on xcode: ["15.0", :build]
+            depends_on :macos
+
+            def install
+              # Stamp the release version in, so \`macon version\` matches the tag.
+              inreplace "Sources/MaconKit/Version.swift",
+                        /maconVersion = "[^"]*"/, "maconVersion = \"#{version}\""
+              system "swift", "build", "--disable-sandbox", "-c", "release"
+              bin.install ".build/release/macon"
+            end
+
+            test do
+              assert_match "macon", shell_output("#{bin}/macon version")
+            end
+          end
+          EOF
+
+      - name: Commit & push to tap
+        run: |
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/macon.rb
+          git commit -m "macon ${{ github.ref_name }}" || { echo "no change"; exit 0; }
+          git push

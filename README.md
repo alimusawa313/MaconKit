@@ -134,30 +134,25 @@ make install PREFIX=~/.local # or a user prefix on your PATH
 
 ## Install via Homebrew
 
-The app and this kit live in **one repo** (monorepo); `MaconKit` is a subpackage.
-The build-from-source formula in [`Formula/macon.rb`](Formula/macon.rb) builds it
-with `--package-path MaconKit`, so publish the **whole repo** as-is.
-
-Bleeding edge (no release needed):
 ```sh
-brew tap YOURNAME/macon https://github.com/YOURNAME/homebrew-macon
-brew install --HEAD macon
-```
-
-### Publishing stable releases (automated)
-Releasing is one command — the release workflow (`.github/workflows/release.yml`
-at the repo root) verifies the build and updates the tap formula on every tag:
-```sh
-git tag v0.1.0 && git push --tags
-```
-One-time setup: create an empty `homebrew-macon` tap repo, and add a PAT
-(`contents:write` on the tap) as the repo secret `HOMEBREW_TAP_TOKEN`. Then users:
-```sh
-brew tap YOURNAME/macon https://github.com/YOURNAME/homebrew-macon
+brew tap alimusawa313/macon https://github.com/alimusawa313/homebrew-macon
 brew install macon
 ```
 
-The formula compiles from source, so no code signing or notarization is needed.
+The formula compiles from source, so there's nothing to code-sign or notarize.
+For the tip of `main` instead of the last release, `brew install --HEAD macon`.
 
-> If you ever want a standalone CLI repo, move `MaconKit/` to its own repo root and
-> drop the `--package-path MaconKit` bits — the package is already self-contained.
+## Where this repo comes from
+
+`MaconKit` is the open core of [MacOn](https://macon.devopsinstitute.id): the
+pipeline engine, the companion server, and the `macon` CLI. It's developed
+alongside the Mac app and published here on every release, with its history
+intact — so what you install is what you can read.
+
+The Mac app and the iOS companion are separate, and this package has no
+dependency on either. It has no external dependencies at all, which is why it
+builds offline and ships through brew as a plain source build.
+
+Issues and questions are welcome here. Because releases are published from the
+app's repo, a pull request may be applied as a patch rather than merged directly —
+either way it lands with attribution.

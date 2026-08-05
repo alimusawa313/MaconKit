@@ -1,26 +1,19 @@
 class Macon < Formula
   desc "Local CI runner — runs macon.yml pipelines on your Mac"
-  homepage "https://github.com/alimusawa313/macon"
+  homepage "https://github.com/alimusawa313/MaconKit"
   license "MIT"
 
-  # Stable release: after you tag & push, set these (see README "Publishing").
-  #   url "https://github.com/alimusawa313/macon/archive/refs/tags/v0.1.0.tar.gz"
-  #   sha256 "PASTE_SHASUM_HERE"
-  #   version "0.1.0"
-
-  # Until then (or for bleeding edge): `brew install --HEAD macon`
-  head "https://github.com/alimusawa313/macon.git", branch: "main"
+  # Reference copy. The formula people actually install is published to the tap
+  # (alimusawa313/homebrew-macon) by the release workflow on every tag, which
+  # fills in url + sha256 + version.
+  head "https://github.com/alimusawa313/MaconKit.git", branch: "main"
 
   depends_on xcode: ["15.0", :build]
   depends_on :macos
 
   def install
-    # Stamp the release version into the binary so `macon version` matches the tag.
-    inreplace "MaconKit/Sources/MaconKit/Version.swift",
-              /maconVersion = "[^"]*"/, "maconVersion = \"#{version}\""
-    # Monorepo: the Swift package lives in the MaconKit/ subdirectory.
-    system "swift", "build", "--disable-sandbox", "-c", "release", "--package-path", "MaconKit"
-    bin.install "MaconKit/.build/release/macon"
+    system "swift", "build", "--disable-sandbox", "-c", "release"
+    bin.install ".build/release/macon"
   end
 
   test do
