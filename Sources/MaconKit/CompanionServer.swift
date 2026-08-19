@@ -200,7 +200,7 @@ public final class CompanionServer: @unchecked Sendable {
 
     /// One inbound terminal frame: keystrokes (base64) or a resize.
     private struct TermInbound: Decodable {
-        let t: String            // "in" | "size"
+        let t: String            // "in" | "size" | "kill"
         let d: String?           // base64 input bytes
         let c: Int?              // cols
         let r: Int?              // rows
@@ -1520,6 +1520,10 @@ public final class CompanionServer: @unchecked Sendable {
                     if let c = inbound.c, let r = inbound.r {
                         Task { await ops.resize(id, c, r) }
                     }
+                case "kill":
+                    // The client is closing this tab for good — a persistent
+                    // session must die NOW, not linger detached for hours.
+                    Task { await ops.close(id) }
                 default: break
                 }
             }
