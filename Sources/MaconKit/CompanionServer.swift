@@ -105,21 +105,29 @@ public final class CompanionServer: @unchecked Sendable {
     }
 
     /// A live shell on the Mac for the companion's Code terminal (nil = the
-    /// /term route 404s). One PTY session per WebSocket; raw output bytes
-    /// stream out as binary frames, input/resizes arrive as JSON text frames.
+    /// /term route 404s). Raw output bytes stream out as binary frames,
+    /// input/resizes arrive as JSON text frames. A session the client marked
+    /// persistent survives its socket and can be reattached by id.
     public struct TermOps: Sendable {
         /// Start a session: id, working directory, and the sink for output
         /// bytes. False = refused (feature off).
-        public var start: @Sendable (String, String?, @escaping @Sendable (Data) -> Void) async -> Bool
+        /// Start a session: id, working directory, persist flag, and the sink
+        /// for output bytes. An id the Mac already knows reattaches instead.
+        public var start: @Sendable (String, String?, Bool, @escaping @Sendable (Data) -> Void) async -> Bool
         public var input: @Sendable (String, Data) async -> Void
         public var resize: @Sendable (String, Int, Int) async -> Void
+        /// The socket closed. A persistent session is kept for reattach;
+        /// anything else should die here.
+        public var detach: @Sendable (String) async -> Void
         public var close: @Sendable (String) async -> Void
 
-        public init(start: @escaping @Sendable (String, String?, @escaping @Sendable (Data) -> Void) async -> Bool,
+        public init(start: @escaping @Sendable (String, String?, Bool, @escaping @Sendable (Data) -> Void) async -> Bool,
                     input: @escaping @Sendable (String, Data) async -> Void,
                     resize: @escaping @Sendable (String, Int, Int) async -> Void,
+                    detach: @escaping @Sendable (String) async -> Void,
                     close: @escaping @Sendable (String) async -> Void) {
-            self.start = start; self.input = input; self.resize = resize; self.close = close
+            self.start = start; self.input = input; self.resize = resize
+            self.detach = detach; self.close = close
         }
     }
 
@@ -843,7 +851,8 @@ public final class CompanionServer: @unchecked Sendable {
         if method == "GET", path == "/term",
            headerValue(header, "upgrade")?.lowercased() == "websocket" {
             guard termOps != nil else { respond(conn, "404 Not Found", json: nil); return }
-            upgradeAndTerm(conn, header: header, cwd: query["cwd"]); return
+            upgradeAndTerm(conn, header: header, cwd: query["cwd"],
+                           session: query["session"], persist: query["persist"] == "1"); return
         }
 
         // /code — native file browsing/editing for the companion's Code screen.
@@ -1457,7 +1466,8 @@ public final class CompanionServer: @unchecked Sendable {
 
     /// Upgrade to WebSocket and bridge a PTY session: raw shell output goes
     /// out as binary frames; JSON text frames carry keystrokes and resizes in.
-    private func upgradeAndTerm(_ conn: NWConnection, header: String, cwd: String?) {
+    private func upgradeAndTerm(_ conn: NWConnection, header: String, cwd: String?,
+                                session: String? = nil, persist: Bool = false) {
         guard let ops = termOps else { respond(conn, "404 Not Found", json: nil); return }
         guard let key = headerValue(header, "sec-websocket-key") else { respond(conn, "400 Bad Request", json: nil); return }
         let magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -1465,15 +1475,20 @@ public final class CompanionServer: @unchecked Sendable {
         let handshake = "HTTP/1.1 101 Switching Protocols\r\n"
             + "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: \(accept)\r\n\r\n"
 
-        let sessionID = UUID().uuidString
+        // The client may bring its own id — that's what lets it reattach to a
+        // shell it left behind. Constrained to UUID shape so a crafted query
+        // can't address anything else. No id = the old one-shot behavior.
+        let sessionID = session.flatMap { UUID(uuidString: $0)?.uuidString } ?? UUID().uuidString
         let state = WSState()
-        state.onClose = { Task { await ops.close(sessionID) } }
+        // Detach, not close: the ops layer decides whether the session dies
+        // with the socket (default) or waits for its owner (persistent).
+        state.onClose = { Task { await ops.detach(sessionID) } }
 
         conn.send(content: Data(handshake.utf8), completion: .contentProcessed { [weak self] _ in
             guard let self else { return }
             Task {
                 // Output path: PTY bytes → binary frames, straight to the socket.
-                let started = await ops.start(sessionID, cwd) { [weak conn] bytes in
+                let started = await ops.start(sessionID, cwd, persist) { [weak conn] bytes in
                     guard let conn, state.open else { return }
                     self.send(conn, payload: bytes, opcode: 0x82)
                 }
