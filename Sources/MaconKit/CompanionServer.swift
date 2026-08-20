@@ -458,7 +458,7 @@ public final class CompanionServer: @unchecked Sendable {
                 case .failed:
                     if !self.loggedWaiting {
                         self.loggedWaiting = true
-                        self.onLog("✗ Port \(self.port.rawValue) is busy (another MacON still running?) — waiting for it…")
+                        self.onLog("✗ Port \(self.port.rawValue) is busy (another MacON still running?), waiting for it…")
                     }
                     self.listener?.cancel()
                     self.listener = nil

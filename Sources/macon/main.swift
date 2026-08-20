@@ -86,7 +86,7 @@ func showSimulators(full: Bool) {
         $0.components(separatedBy: " (").first?.trimmingCharacters(in: .whitespaces)
     }.filter { !$0.isEmpty }
     if runtimes.isEmpty {
-        print("  Simulator runtimes: none — add one with `macon sims install <platform> [version]`")
+        print("  Simulator runtimes: none. Add one with `macon sims install <platform> [version]`")
     } else {
         print("  Simulator runtimes: \(runtimes.joined(separator: ", "))")
     }
@@ -104,7 +104,7 @@ func showSimulators(full: Bool) {
         print("  Device types (\(types.count)):")
         for t in types { print("    • \(t)") }
     } else {
-        print("  Device types: \(types.count) available — see `macon sims list`")
+        print("  Device types: \(types.count) available, see `macon sims list`")
     }
 }
 
@@ -167,7 +167,7 @@ case "lint":
     guard let pipeline = MaconPipelineLoader.load(atPath: path) else {
         fail("Could not load or parse \(path) (needs Ruby for YAML→JSON).")
     }
-    print("✓ \(path) — \(pipeline.name ?? "unnamed")")
+    print("✓ \(path), \(pipeline.name ?? "unnamed")")
     for (name, wf) in (pipeline.workflows ?? [:]).sorted(by: { $0.key < $1.key }) {
         let before = wf.before_run?.joined(separator: ", ") ?? ""
         print("  workflow \(name)" + (before.isEmpty ? "" : "  [before: \(before)]"))
@@ -207,7 +207,7 @@ case "init", "doctor":
     // Check the toolchain an iOS build needs; install what can be installed via
     // Homebrew. `--check` reports only (no installs).
     let checkOnly = flag("check")
-    if !flag("json") { print("macon \(command) — checking CI prerequisites\n") }
+    if !flag("json") { print("macon \(command), checking CI prerequisites\n") }
 
     let hasBrew = probe("command -v brew").code == 0
 
@@ -264,7 +264,7 @@ case "init", "doctor":
     let simCount = Int(sims) ?? 0
     rows.append(DoctorRow(name: "Simulators", ok: simCount > 0,
                           detail: simCount > 0 ? "\(simCount) runtime(s)"
-                                               : "none — macon sims install <platform> [version]"))
+                                               : "none, macon sims install <platform> [version]"))
 
     // Disk space — CI eats it (DerivedData, simulators, archives).
     if let disk = diskSpace() {
@@ -272,7 +272,7 @@ case "init", "doctor":
         rows.append(DoctorRow(name: "Disk space", ok: ok,
                               detail: String(format: "%.0f GB free of %.0f GB%@",
                                              disk.freeGB, disk.totalGB,
-                                             ok ? "" : " — builds need ~20 GB headroom (try `macon`'s app Cleanup or clear DerivedData)")))
+                                             ok ? "" : ", builds need ~20 GB headroom (try `macon`'s app Cleanup or clear DerivedData)")))
     }
 
     // TCC permissions for this process (headless serving from the CLI).
@@ -294,7 +294,7 @@ case "init", "doctor":
     if missing.isEmpty {
         print("\nAll set. ✅")
     } else if checkOnly {
-        print("\nMissing — install with:")
+        print("\nMissing, install with:")
         for d in missing { print("  • \(d.name): \(d.hint)") }
         print("\nRe-run `macon init` (without --check) to auto-install the Homebrew ones.")
     } else {
@@ -304,7 +304,7 @@ case "init", "doctor":
                 print("  • \(d.name) needs manual setup: \(d.hint)")
                 continue
             }
-            print("\n⏳ \(d.name) — \(cmd)")
+            print("\n⏳ \(d.name), \(cmd)")
             let code = await Shell.run(cmd, cwd: FileManager.default.currentDirectoryPath) { line in
                 print("   \(line)")
             }
@@ -313,7 +313,7 @@ case "init", "doctor":
             } else if code == 0 {
                 print("  ✓ \(d.name) installed.")
             } else {
-                print("  ✗ \(d.name) failed (exit \(code)) — do it manually: \(d.hint)")
+                print("  ✗ \(d.name) failed (exit \(code)), do it manually: \(d.hint)")
             }
         }
         print("\nDone. Verify with `macon init --check`.")
@@ -444,7 +444,7 @@ case "pipelines":
           let bundle = try? MaconExport.decoded(from: data) else {
         fail("Couldn't read or parse \(path).")
     }
-    print("\(path) — \(bundle.pipelines.count) pipeline(s)"
+    print("\(path), \(bundle.pipelines.count) pipeline(s)"
           + (bundle.includesSecrets ? ", includes secrets" : ", config only"))
     for cfg in bundle.pipelines {
         let target = cfg.watchMode == .branch ? cfg.branch : "PRs→\(cfg.prTargetBranch.isEmpty ? "any" : cfg.prTargetBranch)"
@@ -589,19 +589,19 @@ case "sims", "simulators", "sim":
             version = args.count > 3 ? args[3] : ""
         }
         if platform == "macOS" {
-            print("macOS apps build & run natively — there's no simulator runtime to install.")
+            print("macOS apps build & run natively, there's no simulator runtime to install.")
             break
         }
         let cmd = version.isEmpty
             ? "xcodebuild -downloadPlatform \(platform)"
             : "xcodebuild -downloadPlatform \(platform) -buildVersion \(version)"
-        print("⏳ Downloading \(platform) \(version.isEmpty ? "(latest)" : version) simulator runtime — this can take a while…")
+        print("⏳ Downloading \(platform) \(version.isEmpty ? "(latest)" : version) simulator runtime, this can take a while…")
         let code = await Shell.run(cmd, cwd: FileManager.default.currentDirectoryPath) { print("   \($0)") }
         if code == 0 {
             print("✓ Done."); showSimulators(full: false)
         } else {
             print("✗ Download failed (exit \(code)).")
-            print("  Your Xcode may not support -buildVersion — add the runtime via")
+            print("  Your Xcode may not support -buildVersion, add the runtime via")
             print("  Xcode ▸ Settings ▸ Components, or run: \(cmd)")
         }
 
@@ -655,7 +655,7 @@ case "companion":
         store.revokeAll(); print("Revoked all paired devices.")
     default:
         print("""
-        macon companion — manage companion-app pairings
+        macon companion, manage companion-app pairings
           devices              list paired iPhones/iPads
           revoke <prefix>      revoke a device by token prefix
           revoke-all           revoke every device
@@ -789,10 +789,10 @@ case "pair":
     // macon pair --host H --code C — pair this CLI with a remote runner.
     do {
         guard option("host") != nil else {
-            fail("Usage: macon pair --host <host[:port] | tunnel-domain> --code <CODE>\n(local runners pair automatically — no need for `macon pair`)")
+            fail("Usage: macon pair --host <host[:port] | tunnel-domain> --code <CODE>\n(local runners pair automatically, no need for `macon pair`)")
         }
         guard let code = option("code") else {
-            fail("Need --code — mint one on the Mac (Settings → Companion → Pair a device) or from `macon watch --companion`.")
+            fail("Need --code, mint one on the Mac (Settings → Companion → Pair a device) or from `macon watch --companion`.")
         }
         let body = try JSONEncoder().encode(["code": code, "device_name": "macon CLI @ \(ProcessInfo.processInfo.hostName)"])
         let (status, data) = try await Remote.request("pair", method: "POST", body: body, authed: false)
@@ -823,13 +823,13 @@ case "config":
     case "init":
         let path = (args.count > 2 && !args[2].hasPrefix("--")) ? args[2] : "macon-export.json"
         guard !FileManager.default.fileExists(atPath: path) || flag("force") else {
-            fail("\(path) already exists — pass --force to overwrite.")
+            fail("\(path) already exists, pass --force to overwrite.")
         }
         guard let data = try? configTemplate().encoded() else { fail("Couldn't encode the template.") }
         do { try data.write(to: URL(fileURLWithPath: path)) }
         catch { fail("Couldn't write \(path): \(error.localizedDescription)") }
         print("""
-        ✓ Wrote \(path) — a starter config with one pipeline.
+        ✓ Wrote \(path), a starter config with one pipeline.
           1. Edit the workspace/repo/branch and build command.
           2. Check it:   macon config validate \(path)
           3. Run it:     macon watch --config \(path)
@@ -847,7 +847,7 @@ case "config":
         if flag("json") {
             printJSON(issues)
         } else {
-            print("\(path) — \(bundle.pipelines.count) pipeline(s)"
+            print("\(path), \(bundle.pipelines.count) pipeline(s)"
                   + (bundle.includesSecrets ? ", includes secrets" : ", config only"))
             for i in issues { print("  \(i.level == "error" ? "✗" : "⚠︎") [\(i.pipeline)] \(i.message)") }
             if issues.isEmpty { print("  ✓ No problems found.") }
@@ -870,22 +870,22 @@ case "validate":
         if flag("json") { printJSON(issues) }
         else {
             for i in issues { print("  \(i.level == "error" ? "✗" : "⚠︎") [\(i.pipeline)] \(i.message)") }
-            if issues.isEmpty { print("✓ \(path) — no problems found.") }
+            if issues.isEmpty { print("✓ \(path), no problems found.") }
         }
         exit(issues.contains { $0.level == "error" } ? 1 : 0)
     } else {
         guard let pipeline = MaconPipelineLoader.load(atPath: path) else {
             fail("Could not load or parse \(path) (needs Ruby for YAML→JSON).")
         }
-        print("✓ \(path) — \(pipeline.name ?? "unnamed") parses fine.")
+        print("✓ \(path), \(pipeline.name ?? "unnamed") parses fine.")
         exit(0)
     }
 
 case "help", "--help", "-h":
     print("""
-    macon — local CI runner (MaconKit)
+    macon, local CI runner (MaconKit)
 
-    Remote control (talks to a running server — the app's, or `watch --companion`):
+    Remote control (talks to a running server, the app's, or `watch --companion`):
       status [--host H] [--json]   pipelines + builds on the runner
       logs [pipeline|build] [--follow]
                                    print (or tail) a build's log; --follow exits 0/1 by result
@@ -920,7 +920,7 @@ case "help", "--help", "-h":
         --branch B                 branch to watch (default: main)
         --prs [--pr-target B]      watch open PRs instead of a branch
         --webhook [--port N]       push mode: listen for webhooks (default port 8787)
-                                   (default is polling — ask the host every --every seconds)
+                                   (default is polling, ask the host every --every seconds)
         --webhook-secret S         require this secret (GitHub HMAC, or in the URL path)
         --timeout MINS             cancel a build that runs longer than MINS (0 = no limit)
         --every SECS               poll interval for polling mode (default: 30)
@@ -938,7 +938,7 @@ case "help", "--help", "-h":
                                    manage paired companion devices
       service <install|uninstall|status> [watch args…] [--label NAME]
                                    run a watch as a launchd service (starts at login, restarts on crash)
-      install-service [\u{2026}]         alias for `service install` — headless runners (e.g. an EC2 Mac):
+      install-service [\u{2026}]         alias for `service install`, headless runners (e.g. an EC2 Mac):
                                    macon install-service --config macon-export.json --companion
     """)
 

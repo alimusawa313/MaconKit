@@ -91,7 +91,7 @@ public final class RunnerAgent: ObservableObject, Identifiable {
             env["PATH"] = "\(jdk.home)/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
             appendLine("☕︎ Using Java \(jdk.version) at \(jdk.home)")
         } else {
-            appendLine("⚠︎ No JDK found — install one (e.g. `brew install openjdk@25`).")
+            appendLine("⚠︎ No JDK found, install one (e.g. `brew install openjdk@25`).")
         }
         proc.environment = env
 

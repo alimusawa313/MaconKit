@@ -38,13 +38,13 @@ public struct BuildEvent: Sendable {
         let where_ = branch.isEmpty ? shaShort : "\(branch) · \(shaShort)"
         switch phase {
         case .started:
-            return ("▶️ \(pipelineName)", "Build started — \(where_)")
+            return ("▶️ \(pipelineName)", "Build started · \(where_)")
         case .passed:
-            return ("✅ \(pipelineName)", "Build passed — \(where_)")
+            return ("✅ \(pipelineName)", "Build passed · \(where_)")
         case .failed:
-            return ("❌ \(pipelineName)", "Build failed — \(detail ?? where_)")
+            return ("❌ \(pipelineName)", "Build failed · \(detail ?? where_)")
         case .cancelled:
-            return ("⏹ \(pipelineName)", "Build cancelled — \(where_)")
+            return ("⏹ \(pipelineName)", "Build cancelled · \(where_)")
         }
     }
 }

@@ -28,7 +28,7 @@ public struct PipelineConfig: Identifiable, Codable, Equatable {
     /// Which git host this pipeline watches (Bitbucket or GitHub).
     public var provider: GitProviderKind = .bitbucket
     public var workspace = ""        // Bitbucket workspace, or GitHub owner/org
-    public var repoSlug = ""         // e.g. "planpal-ios-learner-2"
+    public var repoSlug = ""         // e.g. "my-app-ios"
     public var branch = "main"
     /// Watch a single branch, or all open pull requests.
     public var watchMode: WatchMode = .branch

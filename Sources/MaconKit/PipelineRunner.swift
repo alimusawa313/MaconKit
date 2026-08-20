@@ -102,7 +102,7 @@ public final class PipelineRunner: ObservableObject, Identifiable {
 
         switch config.triggerMode {
         case .polling:
-            appendLine("👀 Polling \(config.workspace)/\(config.repoSlug) — \(target) "
+            appendLine("👀 Polling \(config.workspace)/\(config.repoSlug), \(target) "
                        + "(every \(config.pollSeconds)s).")
             pollTask = Task { @MainActor in await self.pollLoop() }
         case .webhook:
@@ -131,8 +131,8 @@ public final class PipelineRunner: ObservableObject, Identifiable {
         server.start()
         webhookServer = server
         let sec = config.webhookSecret.trimmingCharacters(in: .whitespaces).isEmpty
-            ? "no secret set — accepts any POST" : "secret required"
-        appendLine("🪝 Webhook listening on :\(port) — \(target) (\(sec)). "
+            ? "no secret set, accepts any POST" : "secret required"
+        appendLine("🪝 Webhook listening on :\(port), \(target) (\(sec)). "
                    + "Point the host at http://<this-mac>:\(port)/ (repo settings → Webhooks).")
     }
 
@@ -146,7 +146,7 @@ public final class PipelineRunner: ObservableObject, Identifiable {
         if !event.repoFullName.isEmpty && event.repoFullName != expected { return }
 
         if isBuilding {
-            appendLine("🔔 Event received while building — ignoring (will catch the next).")
+            appendLine("🔔 Event received while building, ignoring (will catch the next).")
             return
         }
 
@@ -200,7 +200,7 @@ public final class PipelineRunner: ObservableObject, Identifiable {
             // First time we see this branch: record head as baseline, don't build.
             if lastBuiltSHA == nil {
                 lastBuiltSHA = sha
-                appendLine("👀 Baseline at \(sha.prefix(8)) — will build new commits from here.")
+                appendLine("👀 Baseline at \(sha.prefix(8)), will build new commits from here.")
                 return
             }
             if sha != lastBuiltSHA && !isBuilding {
@@ -227,7 +227,7 @@ public final class PipelineRunner: ObservableObject, Identifiable {
             if !prBaselineEstablished {
                 for pr in prs { lastBuiltPRSHAs[pr.id] = pr.sourceCommit }
                 prBaselineEstablished = true
-                appendLine("👀 Baseline: \(prs.count) open PR(s) — will build new PR commits from here.")
+                appendLine("👀 Baseline: \(prs.count) open PR(s), will build new PR commits from here.")
                 return
             }
             for pr in prs {
@@ -299,7 +299,7 @@ public final class PipelineRunner: ObservableObject, Identifiable {
             Task { @MainActor in
                 try? await Task.sleep(for: .seconds(limit))
                 if self.control === ctrl && self.isBuilding && !ctrl.cancelled {
-                    self.appendLine("⏱ Build exceeded \(limit)s — cancelling.")
+                    self.appendLine("⏱ Build exceeded \(limit)s, cancelling.")
                     ctrl.cancel()
                 }
             }
@@ -315,7 +315,7 @@ public final class PipelineRunner: ObservableObject, Identifiable {
         if synced == 0 && !control.cancelled {
             if let pipeline = await loadPipelineFile(in: config.workingDirectory) {
                 appendLine("📄 Using \(config.pipelineFile)"
-                           + (pipeline.name.map { " — \($0)" } ?? ""))
+                           + (pipeline.name.map { ", \($0)" } ?? ""))
                 let ctrl = control
                 let options = PipelineExecutor.Options(
                     workingDirectory: config.workingDirectory,
@@ -387,7 +387,7 @@ public final class PipelineRunner: ObservableObject, Identifiable {
         let path = "\(dir)/\(file)"
         let pipeline = await Task.detached { MaconPipelineLoader.load(atPath: path) }.value
         if pipeline == nil, FileManager.default.fileExists(atPath: path) {
-            appendLine("⚠︎ Found \(file) but couldn't parse it — using the build command instead.")
+            appendLine("⚠︎ Found \(file) but couldn't parse it, using the build command instead.")
         }
         return pipeline
     }

@@ -118,7 +118,7 @@ public final class WebhookServer: @unchecked Sendable {
                 let body = acc.subdata(in: bodyStart..<acc.endIndex)
                 let ghSig = self.headerValue(header, "x-hub-signature-256")
                 if !self.authorized(body: body, path: path, githubSignature: ghSig) {
-                    self.onLog("⛔︎ Rejected webhook — secret/signature mismatch.")
+                    self.onLog("⛔︎ Rejected webhook, secret/signature mismatch.")
                     self.respond(conn, status: "401 Unauthorized", body: "unauthorized\n")
                     return
                 }

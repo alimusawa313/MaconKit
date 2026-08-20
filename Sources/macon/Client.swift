@@ -96,7 +96,7 @@ enum Remote {
         do {
             (data, resp) = try await URLSession.shared.data(for: req)
         } catch {
-            throw CLIError("Can't reach \(host) — \((error as? URLError)?.localizedDescription ?? "connection failed").\n"
+            throw CLIError("Can't reach \(host), \((error as? URLError)?.localizedDescription ?? "connection failed").\n"
                            + "Is the app's companion server on, or a `macon watch --companion` running?")
         }
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
@@ -239,9 +239,9 @@ func tccChecks() -> [(name: String, ok: Bool, detail: String)] {
     let ax = AXIsProcessTrusted()
     return [
         ("Screen Recording (this terminal)", screen,
-         screen ? "granted" : "needed only for screen streaming — System Settings → Privacy → Screen Recording"),
+         screen ? "granted" : "needed only for screen streaming, System Settings → Privacy → Screen Recording"),
         ("Accessibility (this terminal)", ax,
-         ax ? "granted" : "needed only for remote control — System Settings → Privacy → Accessibility"),
+         ax ? "granted" : "needed only for remote control, System Settings → Privacy → Accessibility"),
     ]
 }
 
@@ -311,7 +311,7 @@ func validateExport(_ bundle: MaconExport) -> [ConfigIssue] {
 
 let zshCompletion = #"""
 #compdef macon
-# macon zsh completion — install: macon completions zsh > $(brew --prefix)/share/zsh/site-functions/_macon
+# macon zsh completion, install: macon completions zsh > $(brew --prefix)/share/zsh/site-functions/_macon
 _macon() {
   local -a commands
   commands=(
@@ -361,7 +361,7 @@ _macon "$@"
 """#
 
 let bashCompletion = #"""
-# macon bash completion — install: macon completions bash > /usr/local/etc/bash_completion.d/macon
+# macon bash completion, install: macon completions bash > /usr/local/etc/bash_completion.d/macon
 _macon() {
   local cur prev commands
   COMPREPLY=()
