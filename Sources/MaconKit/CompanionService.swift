@@ -47,6 +47,7 @@ public final class CompanionService {
                 audioStatus: (@Sendable () async -> Data?)? = nil,
                 clipboardOps: CompanionServer.ClipboardOps? = nil,
                 onAuthorize: (@Sendable (String) -> Void)? = nil,
+                onDeviceUnpaired: (@Sendable (String) -> Void)? = nil,
                 onLog: @escaping @Sendable (String) -> Void,
                 onListening: @escaping @Sendable (Bool) -> Void = { _ in }) {
         self.store = store
@@ -77,6 +78,13 @@ public final class CompanionService {
             pair: { code, device in
                 guard let token = store.pair(code: code, device: device) else { return nil }
                 return CompanionPairResponseDTO(token: token, runnerName: runnerName)
+            },
+            // A device unpairing itself revokes its own token here, so the
+            // Mac's device list is truthful without anyone touching it.
+            unpair: { token in
+                guard store.revoke(prefix: token) > 0 else { return false }
+                onDeviceUnpaired?(token)
+                return true
             },
             builds: { await data.builds() },
             build: { await data.build(id: $0) },

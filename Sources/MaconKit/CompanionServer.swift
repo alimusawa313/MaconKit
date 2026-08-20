@@ -6,6 +6,7 @@
 //  (Network.framework), same style as WebhookServer. Routes:
 //
 //    POST /pair                 (no auth)  device-code → token
+//    POST /unpair               (Bearer)   end this device's pairing (revokes its token)
 //    GET  /builds               (Bearer)   build list
 //    GET  /builds/{id}          (Bearer)   one build
 //    POST /builds/{id}/rerun    (Bearer)   trigger a fresh run of its pipeline
@@ -230,6 +231,10 @@ public final class CompanionServer: @unchecked Sendable {
 
     private let authorize: Authorize
     private let pair: Pair
+    /// The calling device ends its own pairing: revoke its token. Returns
+    /// whether anything was actually revoked. Nil = the route 404s (older
+    /// wiring), which devices treat as best-effort.
+    private let unpair: (@Sendable (String) async -> Bool)?
     private let builds: Builds
     private let build: Build
     private let logsSince: LogsSince
@@ -329,6 +334,7 @@ public final class CompanionServer: @unchecked Sendable {
     public init(port: UInt16,
                 authorize: @escaping Authorize,
                 pair: @escaping Pair,
+                unpair: (@Sendable (String) async -> Bool)? = nil,
                 builds: @escaping Builds,
                 build: @escaping Build,
                 logsSince: @escaping LogsSince,
@@ -367,6 +373,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8899
         self.authorize = authorize
         self.pair = pair
+        self.unpair = unpair
         self.builds = builds
         self.build = build
         self.logsSince = logsSince
@@ -552,6 +559,18 @@ public final class CompanionServer: @unchecked Sendable {
         // Everything else needs a valid bearer token.
         guard let token = bearer(header), authorize(token) else {
             respond(conn, "401 Unauthorized", json: nil); return
+        }
+
+        // POST /unpair — the calling device ends its own pairing. Its token is
+        // revoked here, so the Mac's paired-devices list updates the moment
+        // the device forgets it (not whenever someone next opens Settings).
+        if method == "POST", path == "/unpair" {
+            guard let unpair else { respond(conn, "404 Not Found", json: nil); return }
+            Task {
+                let ok = await unpair(token)
+                self.respond(conn, ok ? "200 OK" : "404 Not Found", json: nil)
+            }
+            return
         }
 
         // WS /builds/{id}/logs
