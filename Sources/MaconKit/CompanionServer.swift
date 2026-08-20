@@ -7,6 +7,7 @@
 //
 //    POST /pair                 (no auth)  device-code → token
 //    POST /unpair               (Bearer)   end this device's pairing (revokes its token)
+//    GET  /lan                  (Bearer)   LAN port + the certificate to pin there
 //    GET  /builds               (Bearer)   build list
 //    GET  /builds/{id}          (Bearer)   one build
 //    POST /builds/{id}/rerun    (Bearer)   trigger a fresh run of its pipeline
@@ -33,8 +34,19 @@
 //    GET  /clipboard?after=N    (Bearer)   the Mac's latest clipboard item (universal copy & paste)
 //    POST /clipboard            (Bearer)   set the Mac's clipboard from a device
 //
-//  Meant to sit behind a cloudflared tunnel (which terminates TLS), so a
-//  headless EC2 Mac is reachable at a stable https/wss URL.
+//  Two listeners, because the two ways in have different protection:
+//
+//    • the configured port, on every interface, over TLS with the Mac's own
+//      self-signed certificate (LANIdentity), which paired devices pin. This is
+//      the direct LAN path, and it used to be cleartext — meaning the
+//      `Authorization: Bearer` header was readable by anyone on the same Wi-Fi,
+//      and replayable for ever after.
+//    • port + 1, bound to 127.0.0.1 only, cleartext, for cloudflared. Cloudflare
+//      terminates TLS in front of it and nothing on the network can reach it.
+//
+//  So a headless EC2 Mac is reachable at a stable https/wss URL through the
+//  tunnel, and a device at home talks to the Mac directly without putting its
+//  token on the wire.
 //
 
 import Foundation
@@ -227,7 +239,30 @@ public final class CompanionServer: @unchecked Sendable {
 
     private let port: NWEndpoint.Port
     private let queue = DispatchQueue(label: "macon.companion")
-    private var listener: NWListener?
+
+    /// The cleartext port, loopback only, that cloudflared connects to. Derived
+    /// from the configured port rather than configured separately, so there is
+    /// still one number for anyone to think about.
+    public static func loopbackPort(for port: UInt16) -> UInt16 {
+        port == UInt16.max ? port - 1 : port + 1
+    }
+    public var loopbackPort: UInt16 { Self.loopbackPort(for: port.rawValue) }
+
+    /// The LAN listener's TLS identity, resolved on the first bind. Nil means no
+    /// LAN listener at all: the tunnel keeps working and the LAN is simply not
+    /// served, which is the right way to fail. Serving it in the clear instead
+    /// would hand the bearer token to anyone on the same Wi-Fi.
+    private var lanTLS: LANIdentity.Loaded?
+    private var lanTLSResolved = false
+
+    /// `lanTLS?.pin`, reachable from off `queue` (the /pair route answers inside
+    /// a Task, and the app wants it for the beacon).
+    private let pinLock = NSLock()
+    private var publishedPin: String?
+    public var lanCertPin: String? {
+        pinLock.lock(); defer { pinLock.unlock() }
+        return publishedPin
+    }
 
     private let authorize: Authorize
     private let pair: Pair
@@ -416,25 +451,66 @@ public final class CompanionServer: @unchecked Sendable {
     /// start() was called and stop() hasn't been — bind failures keep retrying
     /// while this holds. (Touched only on `queue`.)
     private var shouldRun = false
-    /// Log the "port busy, waiting" line once per wait, not every 3 s.
-    private var loggedWaiting = false
+
+    /// One listener plus what its rebind loop needs. There are two: the TLS one
+    /// facing the LAN on the configured port, and a cleartext one on loopback
+    /// for cloudflared, which is already behind Cloudflare's TLS.
+    private final class Endpoint {
+        let name: String
+        var listener: NWListener?
+        var ready = false
+        /// Log the "port busy, waiting" line once per wait, not every 3s.
+        var loggedWaiting = false
+        init(_ name: String) { self.name = name }
+    }
+    private let lan = Endpoint("LAN")
+    private let loopback = Endpoint("loopback")
 
     public func start() {
         queue.async { [self] in
             guard !shouldRun else { return }
             shouldRun = true
-            loggedWaiting = false
+            lan.loggedWaiting = false
+            loopback.loggedWaiting = false
             bind()
         }
     }
 
-    /// One bind attempt. A busy port (e.g. an older app instance still holding
-    /// it during an update) is NOT fatal: NWListener reports it asynchronously
-    /// through the state handler, so we watch for `.failed`, release, and try
-    /// again every few seconds — the moment the old instance quits, this one
-    /// takes over and paired devices reconnect on their own.
+    /// One bind attempt for each listener. A busy port (e.g. an older app
+    /// instance still holding it during an update) is NOT fatal: NWListener
+    /// reports it asynchronously through the state handler, so we watch for
+    /// `.failed`, release, and try again every few seconds — the moment the old
+    /// instance quits, this one takes over and paired devices reconnect on
+    /// their own.
     private func bind() {
-        guard shouldRun, listener == nil else { return }
+        guard shouldRun else { return }
+        resolveLANIdentity()
+        // The LAN gets TLS or it gets nothing.
+        if let lanTLS {
+            bind(lan, port: port, tls: lanTLS, loopbackOnly: false)
+        }
+        bind(loopback, port: NWEndpoint.Port(rawValue: loopbackPort) ?? port,
+             tls: nil, loopbackOnly: true)
+    }
+
+    /// Resolve (and on first ever run, create) the LAN certificate. Once only:
+    /// a rebind must not churn the pin, because every paired device has it.
+    private func resolveLANIdentity() {
+        guard !lanTLSResolved else { return }
+        lanTLSResolved = true
+        lanTLS = LANIdentity.loadOrCreate(log: onLog)
+        pinLock.lock()
+        publishedPin = lanTLS?.pin
+        pinLock.unlock()
+        if lanTLS == nil {
+            onLog("✗ No LAN certificate, so the companion is reachable through the tunnel only. "
+                  + "Serving the LAN without TLS would put the device token on the wire in the clear.")
+        }
+    }
+
+    private func bind(_ endpoint: Endpoint, port: NWEndpoint.Port,
+                     tls: LANIdentity.Loaded?, loopbackOnly: Bool) {
+        guard shouldRun, endpoint.listener == nil else { return }
         // Latency-tuned TCP: no Nagle batching, and QoS-tagged as
         // interactive video so Wi-Fi (WMM) prioritizes our packets.
         let tcp = NWProtocolTCP.Options()
@@ -449,50 +525,86 @@ public final class CompanionServer: @unchecked Sendable {
         tcp.keepaliveIdle = 10          // start probing after 10s idle
         tcp.keepaliveInterval = 5       // probe every 5s
         tcp.keepaliveCount = 2          // give up after 2 misses (~20s)
-        let params = NWParameters(tls: nil, tcp: tcp)
+
+        var tlsOptions: NWProtocolTLS.Options?
+        if let tls {
+            guard let identity = sec_identity_create(tls.identity) else {
+                onLog("✗ LAN TLS: the certificate could not be handed to the listener")
+                return
+            }
+            let options = NWProtocolTLS.Options()
+            sec_protocol_options_set_local_identity(options.securityProtocolOptions, identity)
+            // No client gets to negotiate anything older, on a link where the
+            // whole point is that a passive listener learns nothing.
+            sec_protocol_options_set_min_tls_protocol_version(options.securityProtocolOptions, .TLSv12)
+            tlsOptions = options
+        }
+
+        let params = NWParameters(tls: tlsOptions, tcp: tcp)
         params.allowLocalEndpointReuse = true
         params.serviceClass = .interactiveVideo
+        // Binding the cleartext listener to 127.0.0.1 is the other half of the
+        // fix: cloudflared reaches it, nothing on the Wi-Fi can.
+        if loopbackOnly {
+            params.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: port)
+        }
+
         do {
-            let l = try NWListener(using: params, on: port)
+            let l = loopbackOnly ? try NWListener(using: params) : try NWListener(using: params, on: port)
             l.newConnectionHandler = { [weak self] conn in self?.accept(conn) }
             l.stateUpdateHandler = { [weak self] state in
                 guard let self else { return }
                 switch state {
                 case .ready:
-                    self.loggedWaiting = false
-                    self.onLog("📡 Companion server listening on :\(self.port.rawValue)")
-                    self.onListening(true)
+                    endpoint.loggedWaiting = false
+                    endpoint.ready = true
+                    let how = tls != nil ? "https" : "http, loopback only"
+                    self.onLog("📡 Companion server listening on :\(port.rawValue) (\(how))")
+                    self.reportListening()
                 case .failed:
-                    if !self.loggedWaiting {
-                        self.loggedWaiting = true
-                        self.onLog("✗ Port \(self.port.rawValue) is busy (another MacON still running?), waiting for it…")
+                    if !endpoint.loggedWaiting {
+                        endpoint.loggedWaiting = true
+                        self.onLog("✗ Port \(port.rawValue) is busy (another MacON still running?), waiting for it…")
                     }
-                    self.listener?.cancel()
-                    self.listener = nil
-                    self.onListening(false)
-                    self.scheduleRebind()
+                    endpoint.listener?.cancel()
+                    endpoint.listener = nil
+                    endpoint.ready = false
+                    self.reportListening()
+                    self.scheduleRebind(endpoint, port: port, tls: tls, loopbackOnly: loopbackOnly)
                 default:
                     break
                 }
             }
             l.start(queue: queue)
-            listener = l
+            endpoint.listener = l
         } catch {
             onLog("✗ Companion couldn't bind port \(port.rawValue): \(error.localizedDescription)")
-            onListening(false)
-            scheduleRebind()
+            reportListening()
+            scheduleRebind(endpoint, port: port, tls: tls, loopbackOnly: loopbackOnly)
         }
     }
 
-    private func scheduleRebind() {
-        queue.asyncAfter(deadline: .now() + 3) { [weak self] in self?.bind() }
+    /// "Listening" for the UI means a device could reach us: over the LAN, or
+    /// through the tunnel that rides the loopback listener.
+    private func reportListening() {
+        onListening(lan.ready || loopback.ready)
+    }
+
+    private func scheduleRebind(_ endpoint: Endpoint, port: NWEndpoint.Port,
+                                tls: LANIdentity.Loaded?, loopbackOnly: Bool) {
+        queue.asyncAfter(deadline: .now() + 3) { [weak self] in
+            self?.bind(endpoint, port: port, tls: tls, loopbackOnly: loopbackOnly)
+        }
     }
 
     public func stop() {
         queue.async { [self] in
             shouldRun = false                 // also parks any pending rebind
-            listener?.cancel()
-            listener = nil
+            for endpoint in [lan, loopback] {
+                endpoint.listener?.cancel()
+                endpoint.listener = nil
+                endpoint.ready = false
+            }
             onListening(false)
         }
     }
@@ -548,9 +660,13 @@ public final class CompanionServer: @unchecked Sendable {
         if method == "POST", path == "/pair" {
             Task {
                 guard let req = try? CompanionJSON.decoder.decode(CompanionPairRequestDTO.self, from: body),
-                      let resp = await self.pair(req.code, req.deviceName) else {
+                      var resp = await self.pair(req.code, req.deviceName) else {
                     self.respond(conn, "401 Unauthorized", json: nil); return
                 }
+                // Hand over the LAN certificate to expect, so the device pins it
+                // from this moment on. Pairing itself has either come through the
+                // tunnel, or over this very TLS connection on first sight.
+                resp.lanCertSha256 = self.lanCertPin
                 self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(resp))
             }
             return
@@ -587,6 +703,15 @@ public final class CompanionServer: @unchecked Sendable {
                 let lines = await self.logsSince(id, after)
                 self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(lines))
             }
+            return
+        }
+
+        // GET /lan — the port and exact certificate to expect on a direct LAN
+        // connection. Authenticated, so a device that paired before LAN TLS
+        // existed can learn the pin over the tunnel rather than being re-paired.
+        if method == "GET", path == "/lan" {
+            let dto = CompanionLANDTO(port: Int(self.port.rawValue), certSha256: lanCertPin)
+            respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(dto))
             return
         }
 
