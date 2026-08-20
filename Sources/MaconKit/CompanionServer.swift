@@ -29,6 +29,8 @@
 //    WS   /audio                (Bearer)   encoded Mac system audio → device
 //    WS   /mic                  (Bearer)   encoded device microphone → Mac
 //    GET  /audio/status         (Bearer)   driver + consent state for media I/O
+//    GET  /clipboard?after=N    (Bearer)   the Mac's latest clipboard item (universal copy & paste)
+//    POST /clipboard            (Bearer)   set the Mac's clipboard from a device
 //
 //  Meant to sit behind a cloudflared tunnel (which terminates TLS), so a
 //  headless EC2 Mac is reachable at a stable https/wss URL.
@@ -198,6 +200,22 @@ public final class CompanionServer: @unchecked Sendable {
         }
     }
 
+    /// Universal clipboard (nil = the /clipboard routes 404). Payloads are
+    /// encoded CompanionClipboardDTOs; the app owns the pasteboard bridging.
+    public struct ClipboardOps: Sendable {
+        /// The newest item, when newer than `after` (empty reps otherwise, so
+        /// the poll stays cheap). Nil = refused (403, the toggle is off).
+        public var latest: @Sendable (Int) async -> Data?
+        /// A device's clipboard becomes the Mac's; returns the ack ({seq}) so
+        /// the sender skips its own echo. Nil = refused (403) or a bad body.
+        public var push: @Sendable (Data) async -> Data?
+
+        public init(latest: @escaping @Sendable (Int) async -> Data?,
+                    push: @escaping @Sendable (Data) async -> Data?) {
+            self.latest = latest; self.push = push
+        }
+    }
+
     /// One inbound terminal frame: keystrokes (base64) or a resize.
     private struct TermInbound: Decodable {
         let t: String            // "in" | "size" | "kill"
@@ -299,6 +317,8 @@ public final class CompanionServer: @unchecked Sendable {
     private let micOps: MicOps?
     /// Encoded CompanionAudioStatusDTO for GET /audio/status (nil = 404).
     private let audioStatus: (@Sendable () async -> Data?)?
+    /// Universal clipboard (nil disables the /clipboard routes).
+    private let clipboardOps: ClipboardOps?
     /// The live /mic connection, so a new source can evict it (last wins).
     private let micLock = NSLock()
     private var micConn: NWConnection?
@@ -341,6 +361,7 @@ public final class CompanionServer: @unchecked Sendable {
                 audio: AudioBroadcaster? = nil,
                 micOps: MicOps? = nil,
                 audioStatus: (@Sendable () async -> Data?)? = nil,
+                clipboardOps: ClipboardOps? = nil,
                 onLog: @escaping @Sendable (String) -> Void,
                 onListening: @escaping @Sendable (Bool) -> Void = { _ in }) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8899
@@ -378,6 +399,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.audio = audio
         self.micOps = micOps
         self.audioStatus = audioStatus
+        self.clipboardOps = clipboardOps
         self.onLog = onLog
         self.onListening = onListening
     }
@@ -605,6 +627,31 @@ public final class CompanionServer: @unchecked Sendable {
         if method == "GET", path == "/audio/status" {
             guard let audioStatus else { respond(conn, "404 Not Found", json: nil); return }
             Task { self.respond(conn, "200 OK", json: await audioStatus()) }
+            return
+        }
+
+        // GET /clipboard?after=N — the Mac's latest clipboard item (universal
+        // copy & paste). reps come back empty when nothing is newer than N.
+        if method == "GET", path == "/clipboard" {
+            guard let ops = clipboardOps else { respond(conn, "404 Not Found", json: nil); return }
+            let after = Int(query["after"] ?? "") ?? -1
+            Task {
+                if let data = await ops.latest(after) {
+                    self.respond(conn, "200 OK", json: data)
+                } else { self.respond(conn, "403 Forbidden", json: nil) }
+            }
+            return
+        }
+
+        // POST /clipboard — a device's clipboard becomes the Mac's (and is
+        // offered to every other paired device on their next poll).
+        if method == "POST", path == "/clipboard" {
+            guard let ops = clipboardOps else { respond(conn, "404 Not Found", json: nil); return }
+            Task {
+                if let ack = await ops.push(body) {
+                    self.respond(conn, "200 OK", json: ack)
+                } else { self.respond(conn, "403 Forbidden", json: nil) }
+            }
             return
         }
 

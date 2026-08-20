@@ -220,6 +220,41 @@ public struct CompanionPowerDTO: Codable, Sendable {
     }
 }
 
+// MARK: - Universal clipboard (copy here, paste there)
+
+/// One representation of the clipboard content — the same item usually ships
+/// several (an image as PNG plus its file name, rich text plus plain text), so
+/// the receiving side can offer the richest form each paste target accepts.
+public struct CompanionClipboardRepDTO: Codable, Sendable {
+    public var type: String          // UTI, e.g. "public.utf8-plain-text", "public.png"
+    public var name: String?         // filename, when the data is a file's contents
+    public var data: Data            // raw bytes (base64 over the wire)
+    public init(type: String, name: String? = nil, data: Data) {
+        self.type = type; self.name = name; self.data = data
+    }
+}
+
+/// The clipboard item riding `GET`/`POST /clipboard`. `seq` is the Mac's
+/// ordering: time-based so it stays monotonic across Mac app restarts, and a
+/// device only applies an item whose seq is beyond what it has already seen.
+/// A GET reply with empty `reps` means "nothing newer than what you asked for".
+public struct CompanionClipboardDTO: Codable, Sendable {
+    public var seq: Int
+    public var origin: String        // "mac" | the pushing device's name
+    public var at: Date?
+    public var reps: [CompanionClipboardRepDTO]
+    public init(seq: Int, origin: String, at: Date? = nil, reps: [CompanionClipboardRepDTO]) {
+        self.seq = seq; self.origin = origin; self.at = at; self.reps = reps
+    }
+}
+
+/// `POST /clipboard` reply — the seq the push landed as, so the sender skips
+/// re-fetching its own item.
+public struct CompanionClipboardAckDTO: Codable, Sendable {
+    public var seq: Int
+    public init(seq: Int) { self.seq = seq }
+}
+
 // MARK: - Code (native file editing)
 
 /// One entry in a directory listing (`GET /code/list`).

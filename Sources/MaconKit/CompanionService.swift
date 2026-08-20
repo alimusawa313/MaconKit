@@ -45,6 +45,7 @@ public final class CompanionService {
                 audio: AudioBroadcaster? = nil,
                 micOps: CompanionServer.MicOps? = nil,
                 audioStatus: (@Sendable () async -> Data?)? = nil,
+                clipboardOps: CompanionServer.ClipboardOps? = nil,
                 onAuthorize: (@Sendable (String) -> Void)? = nil,
                 onLog: @escaping @Sendable (String) -> Void,
                 onListening: @escaping @Sendable (Bool) -> Void = { _ in }) {
@@ -112,6 +113,7 @@ public final class CompanionService {
             audio: audio,
             micOps: micOps,
             audioStatus: audioStatus,
+            clipboardOps: clipboardOps,
             onLog: onLog,
             onListening: onListening)
     }
