@@ -499,30 +499,112 @@ public final class CompanionServer: @unchecked Sendable {
 
     // MARK: Request lifecycle
 
-    private func accept(_ conn: NWConnection) {
-        conn.start(queue: queue)
-        readRequest(conn, buffer: Data())
+    // Caps on a request that has not been authenticated yet. Anyone who reaches
+    // the tunnel URL can open a connection and start sending, and the buffer
+    // holding a request while it arrives is filled before routing and before the
+    // bearer gate. So it has to be bounded here, not by the routes.
+
+    /// Ceiling on one request body. /clipboard accepts 16 MB at the app layer
+    /// and base64 inside JSON inflates that by a third, so this fits the largest
+    /// legitimate payload (a clipboard image) and little else.
+    private static let maxBodyBytes = 32 * 1024 * 1024
+    /// Ceiling on the header block on its own. Real requests are a few KB.
+    private static let maxHeaderBytes = 64 * 1024
+    /// Headers have to finish arriving inside this, so a sender that never sends
+    /// the blank line cannot hold a socket for ever.
+    private static let headerDeadline: TimeInterval = 30
+    /// How often the watchdog checks a request is still making progress.
+    private static let progressInterval: TimeInterval = 10
+
+    /// One request while it is still arriving. Touched only on `queue`, which is
+    /// serial, so it needs no locking of its own.
+    private final class Incoming {
+        var buffer = Data()
+        /// How far we have already looked for the header terminator, so a large
+        /// body is not rescanned from byte zero on every read.
+        var scanned = 0
+        var headerComplete = false
+        /// Buffer size at the last watchdog tick, to spot a stalled sender.
+        var mark = 0
+        /// Set once the request reaches `route`, which stands the watchdog down:
+        /// past that point a WebSocket upgrade owns the connection and may sit
+        /// idle for as long as it likes.
+        var routed = false
+        let started = Date()
     }
 
-    /// Accumulate until the full header block (and any POST body) has arrived.
-    private func readRequest(_ conn: NWConnection, buffer: Data) {
+    private func accept(_ conn: NWConnection) {
+        conn.start(queue: queue)
+        let incoming = Incoming()
+        watchProgress(conn, incoming)
+        readRequest(conn, incoming)
+    }
+
+    /// Drop a connection that stalls before it is routed. Without this a trickle
+    /// of a byte at a time keeps a socket, and the buffer behind it, alive.
+    private func watchProgress(_ conn: NWConnection, _ incoming: Incoming) {
+        queue.asyncAfter(deadline: .now() + Self.progressInterval) { [weak self] in
+            guard !incoming.routed else { return }
+            guard let self else { conn.cancel(); return }
+            if !incoming.headerComplete,
+               Date().timeIntervalSince(incoming.started) > Self.headerDeadline {
+                conn.cancel(); return
+            }
+            guard incoming.buffer.count > incoming.mark else { conn.cancel(); return }
+            incoming.mark = incoming.buffer.count
+            self.watchProgress(conn, incoming)
+        }
+    }
+
+    /// Accumulate until the full header block (and any POST body) has arrived,
+    /// refusing anything that grows past the caps above.
+    private func readRequest(_ conn: NWConnection, _ incoming: Incoming) {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
             guard let self else { conn.cancel(); return }
-            var acc = buffer
-            if let data, !data.isEmpty { acc.append(data) }
-            guard let sep = acc.range(of: Data("\r\n\r\n".utf8)) else {
-                if isComplete || error != nil { conn.cancel() } else { self.readRequest(conn, buffer: acc) }
+            if let data, !data.isEmpty { incoming.buffer.append(data) }
+
+            guard let sep = self.headerTerminator(in: incoming) else {
+                // Still inside the header block. Nothing legitimate is this big,
+                // so a buffer past the cap means the terminator is being withheld.
+                if incoming.buffer.count > Self.maxHeaderBytes {
+                    self.respond(conn, "431 Request Header Fields Too Large", json: nil); return
+                }
+                if isComplete || error != nil { conn.cancel() } else { self.readRequest(conn, incoming) }
                 return
             }
-            let header = String(data: acc.subdata(in: acc.startIndex..<sep.lowerBound), encoding: .utf8) ?? ""
+            incoming.headerComplete = true
+
+            let header = String(data: incoming.buffer.subdata(in: incoming.buffer.startIndex..<sep.lowerBound),
+                                encoding: .utf8) ?? ""
             let contentLength = self.headerInt(header, "content-length") ?? 0
-            let have = acc.distance(from: sep.upperBound, to: acc.endIndex)
-            if have < contentLength && !isComplete && error == nil {
-                self.readRequest(conn, buffer: acc); return
+            // Refuse on the declared length, before a byte of the body is kept.
+            if contentLength > Self.maxBodyBytes {
+                self.respond(conn, "413 Payload Too Large", json: nil); return
             }
-            let body = acc.subdata(in: sep.upperBound..<acc.endIndex)
+            let have = incoming.buffer.distance(from: sep.upperBound, to: incoming.buffer.endIndex)
+            if have < contentLength && !isComplete && error == nil {
+                // And on what actually arrives, for a sender that under-declares.
+                if have > Self.maxBodyBytes {
+                    self.respond(conn, "413 Payload Too Large", json: nil); return
+                }
+                self.readRequest(conn, incoming); return
+            }
+            incoming.routed = true
+            let body = incoming.buffer.subdata(in: sep.upperBound..<incoming.buffer.endIndex)
             self.route(conn, header: header, body: body)
         }
+    }
+
+    /// The `\r\n\r\n` that ends the header block, resuming the search where the
+    /// last read stopped (less the three bytes a split terminator needs). Without
+    /// the resume, a 32 MB body is scanned from the start on every read, which is
+    /// its own denial of service.
+    private func headerTerminator(in incoming: Incoming) -> Range<Data.Index>? {
+        let buffer = incoming.buffer
+        let from = buffer.index(buffer.startIndex, offsetBy: incoming.scanned)
+        if let found = buffer.range(of: Data("\r\n\r\n".utf8), in: from..<buffer.endIndex) { return found }
+        incoming.scanned = max(0, buffer.count - 3)
+        return nil
     }
 
     private func route(_ conn: NWConnection, header: String, body: Data) {
