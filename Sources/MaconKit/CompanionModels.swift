@@ -209,14 +209,32 @@ public struct CompanionPowerDTO: Codable, Sendable {
     public var broadcast: String?      // subnet broadcast address, for WoL
     public var privacyUp: Bool         // the privacy curtain is currently raised
     public var onACPower: Bool         // running on AC power (lid-closed capture needs it)
+    /// macOS grants these to a signed binary and takes them away again when the
+    /// binary changes: rebuild the app and both are gone until someone re-ticks
+    /// them. Without Accessibility the Mac cannot type its own password, and
+    /// without Screen Recording the capture yields nothing, while every other
+    /// route keeps working perfectly. Reported so a device can name the missing
+    /// one instead of showing a dead unlock button over a black screen.
+    public var accessibility: Bool?
+    public var screenRecording: Bool?
+    /// This Mac's own key-repeat settings, so a device holding a key can repeat
+    /// at the rate the person actually chose in System Settings.
+    public var keyRepeatDelay: Double?
+    public var keyRepeatInterval: Double?
     public init(locked: Bool, displayAsleep: Bool, keepAwake: Bool,
                 canWake: Bool, canUnlock: Bool, mac: String?, broadcast: String?,
-                privacyUp: Bool = false, onACPower: Bool = true) {
+                privacyUp: Bool = false, onACPower: Bool = true,
+                accessibility: Bool? = nil, screenRecording: Bool? = nil,
+                keyRepeatDelay: Double? = nil, keyRepeatInterval: Double? = nil) {
         self.locked = locked; self.displayAsleep = displayAsleep; self.keepAwake = keepAwake
         self.canWake = canWake; self.canUnlock = canUnlock
         self.mac = mac; self.broadcast = broadcast
         self.privacyUp = privacyUp
         self.onACPower = onACPower
+        self.accessibility = accessibility
+        self.screenRecording = screenRecording
+        self.keyRepeatDelay = keyRepeatDelay
+        self.keyRepeatInterval = keyRepeatInterval
     }
 }
 
