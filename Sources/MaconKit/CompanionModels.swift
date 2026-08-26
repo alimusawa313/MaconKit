@@ -325,21 +325,6 @@ public struct CompanionPairRequestDTO: Codable, Sendable {
 public struct CompanionPairResponseDTO: Codable, Sendable {
     public var token: String
     public var runnerName: String
-    /// Base64 SHA-256 of the certificate the Mac presents on the LAN, stamped in
-    /// by the server. A device keeps it and accepts nothing else there. Nil when
-    /// the Mac has no LAN listener, and absent entirely from an older Mac, so a
-    /// device treats nil as "no direct LAN connection available".
-    public var lanCertSha256: String? = nil
-}
-
-/// How to reach this Mac directly over the LAN. Fetched over the tunnel, whose
-/// certificate the device has already checked against the public CA set, so the
-/// pin arrives on a channel that is authenticated independently of the LAN it
-/// describes. This is what lets a device paired before LAN TLS existed pick the
-/// pin up on its own instead of being re-paired by hand.
-public struct CompanionLANDTO: Codable, Sendable {
-    public var port: Int
-    public var certSha256: String?
 }
 
 /// Shared JSON coding — snake_case keys, ISO-8601 dates, matching the app.

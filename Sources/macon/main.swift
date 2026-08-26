@@ -795,35 +795,16 @@ case "pair":
     // macon pair --host H --code C — pair this CLI with a remote runner.
     do {
         guard option("host") != nil else {
-            fail("Usage: macon pair --host <host[:port] | tunnel-domain> --code <CODE> [--pin <cert>]\n(local runners pair automatically, no need for `macon pair`)")
+            fail("Usage: macon pair --host <host[:port] | tunnel-domain> --code <CODE>\n(local runners pair automatically, no need for `macon pair`)")
         }
         guard let code = option("code") else {
             fail("Need --code, mint one on the Mac (Settings → Companion → Pair a device) or from `macon watch --companion`.")
         }
         let body = try JSONEncoder().encode(["code": code, "device_name": "macon CLI @ \(ProcessInfo.processInfo.hostName)"])
-        // Pairing is the one moment we will talk to a LAN Mac whose certificate
-        // we have never seen, so accept it here and check it against what the
-        // response says it should be. Same trust-on-first-use as ssh, and the
-        // pairing code is single-use with a short life.
-        let transport = Remote.makeSession(trustOnFirstUse: true)
-        let (status, data) = try await Remote.request("pair", method: "POST", body: body,
-                                                     authed: false, using: transport)
+        let (status, data) = try await Remote.request("pair", method: "POST", body: body, authed: false)
         guard status == 200,
               let resp = try? CompanionJSON.decoder.decode(CompanionPairResponseDTO.self, from: data) else {
             fail(status == 401 ? "Pairing code rejected or expired." : Remote.httpHint(status))
-        }
-        if Remote.isLANish, let seen = transport.trust.observed {
-            // The Mac names the certificate to expect on the LAN. If that is not
-            // the one that just answered, something is in the middle.
-            if let claimed = resp.lanCertSha256, claimed != seen {
-                fail("""
-                     Refusing to record a certificate: \(Remote.host) answered with one
-                     certificate and named a different one as its own. Something is
-                     between you and that Mac.
-                     """)
-            }
-            Remote.storePin(resp.lanCertSha256 ?? seen)
-            print("· recorded this Mac's LAN certificate (\(String(seen.prefix(12)))…)")
         }
         Remote.storeToken(resp.token)
         print("✓ Paired with \(resp.runnerName) at \(Remote.host). Token stored in the Keychain.")
