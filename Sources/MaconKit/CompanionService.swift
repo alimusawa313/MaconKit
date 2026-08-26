@@ -82,7 +82,7 @@ public final class CompanionService {
             // A device unpairing itself revokes its own token here, so the
             // Mac's device list is truthful without anyone touching it.
             unpair: { token in
-                guard store.revoke(token: token) > 0 else { return false }
+                guard store.revoke(prefix: token) > 0 else { return false }
                 onDeviceUnpaired?(token)
                 return true
             },
