@@ -244,11 +244,15 @@ public struct CompanionSystemDTO: Codable, Sendable {
     public var thermal: String
     /// Seconds since boot.
     public var uptime: Double
+    /// Built-in display brightness, 0…1. Nil when there is no built-in display
+    /// to ask (a desktop, lid-only externals) — the remote slider then falls
+    /// back to stepping the brightness keys.
+    public var brightness: Double?
 
     public init(cpu: Double, memUsed: Int64, memTotal: Int64,
                 diskFree: Int64, diskTotal: Int64,
                 battery: Double?, charging: Bool?, onAC: Bool,
-                thermal: String, uptime: Double) {
+                thermal: String, uptime: Double, brightness: Double? = nil) {
         self.cpu = cpu
         self.memUsed = memUsed
         self.memTotal = memTotal
@@ -259,6 +263,7 @@ public struct CompanionSystemDTO: Codable, Sendable {
         self.onAC = onAC
         self.thermal = thermal
         self.uptime = uptime
+        self.brightness = brightness
     }
 }
 

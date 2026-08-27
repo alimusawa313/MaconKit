@@ -12,7 +12,8 @@ import Foundation
 public struct ControlEvent: Codable, Sendable {
     /// "move" | "movedelta" | "mouse" | "click" | "scroll" | "text" | "key" |
     /// "keyreset" (drop held modifiers) | "combo" | "media" | "volume" |
-    /// "fps" | "res" | "launch" (s = .app path) | "uiscale" (code: 0 restore,
+    /// "brightness" (v = 0…1, built-in display) | "fps" | "res" |
+    /// "launch" (s = .app path or http(s) URL) | "uiscale" (code: 0 restore,
     /// 1 bigger UI, 2 biggest — a viewing device's session display profile)
     public var t: String
     public var x: Double?          // normalized cursor position
