@@ -199,6 +199,30 @@ public struct CompanionAIProvidersDTO: Codable, Sendable {
     public init(providers: [CompanionAIProviderDTO]) { self.providers = providers }
 }
 
+/// One output device the Mac could play through (`GET /audio/outputs`).
+public struct CompanionAudioOutputDTO: Codable, Sendable {
+    public var uid: String        // stable CoreAudio device UID
+    public var name: String       // "MacBook Pro Speakers", "AirPods Pro"
+    public var current: Bool      // the default output right now
+
+    public init(uid: String, name: String, current: Bool) {
+        self.uid = uid
+        self.name = name
+        self.current = current
+    }
+}
+
+public struct CompanionAudioOutputsDTO: Codable, Sendable {
+    public var outputs: [CompanionAudioOutputDTO]
+    public init(outputs: [CompanionAudioOutputDTO]) { self.outputs = outputs }
+}
+
+/// `POST /audio/output` — make this device the default output.
+public struct CompanionAudioOutputSetDTO: Codable, Sendable {
+    public var uid: String
+    public init(uid: String) { self.uid = uid }
+}
+
 /// The Mac's own weather report (`GET /system`): what the vitals tiles on a
 /// device show. Everything here is cheap to read — the endpoint is polled.
 public struct CompanionSystemDTO: Codable, Sendable {

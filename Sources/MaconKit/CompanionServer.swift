@@ -325,6 +325,10 @@ public final class CompanionServer: @unchecked Sendable {
     /// The Mac's vitals for GET /system (nil = 404, and the device's vitals
     /// tiles say the Mac needs updating).
     private let system: (@Sendable () async -> CompanionSystemDTO)?
+    /// Output devices for GET /audio/outputs, and the switch for POST
+    /// /audio/output — the deck's output-picker tile.
+    private let audioOutputs: (@Sendable () async -> CompanionAudioOutputsDTO)?
+    private let setAudioOutput: (@Sendable (String) async -> Bool)?
     /// Universal clipboard (nil disables the /clipboard routes).
     private let clipboardOps: ClipboardOps?
     /// The live /mic connection, so a new source can evict it (last wins).
@@ -371,6 +375,8 @@ public final class CompanionServer: @unchecked Sendable {
                 micOps: MicOps? = nil,
                 audioStatus: (@Sendable () async -> Data?)? = nil,
                 system: (@Sendable () async -> CompanionSystemDTO)? = nil,
+                audioOutputs: (@Sendable () async -> CompanionAudioOutputsDTO)? = nil,
+                setAudioOutput: (@Sendable (String) async -> Bool)? = nil,
                 clipboardOps: ClipboardOps? = nil,
                 onLog: @escaping @Sendable (String) -> Void,
                 onListening: @escaping @Sendable (Bool) -> Void = { _ in }) {
@@ -411,6 +417,8 @@ public final class CompanionServer: @unchecked Sendable {
         self.micOps = micOps
         self.audioStatus = audioStatus
         self.system = system
+        self.audioOutputs = audioOutputs
+        self.setAudioOutput = setAudioOutput
         self.clipboardOps = clipboardOps
         self.onLog = onLog
         self.onListening = onListening
@@ -659,6 +667,26 @@ public final class CompanionServer: @unchecked Sendable {
         if method == "GET", path == "/system" {
             guard let system else { respond(conn, "404 Not Found", json: nil); return }
             Task { self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(await system())) }
+            return
+        }
+
+        // GET /audio/outputs — where the Mac can play, and where it is playing.
+        if method == "GET", path == "/audio/outputs" {
+            guard let audioOutputs else { respond(conn, "404 Not Found", json: nil); return }
+            Task { self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(await audioOutputs())) }
+            return
+        }
+
+        // POST /audio/output {"uid": …} — switch the default output device.
+        if method == "POST", path == "/audio/output" {
+            guard let setAudioOutput else { respond(conn, "404 Not Found", json: nil); return }
+            guard let req = try? CompanionJSON.decoder.decode(CompanionAudioOutputSetDTO.self, from: body) else {
+                respond(conn, "400 Bad Request", json: nil); return
+            }
+            Task {
+                let ok = await setAudioOutput(req.uid)
+                self.respond(conn, ok ? "200 OK" : "404 Not Found", json: nil)
+            }
             return
         }
 

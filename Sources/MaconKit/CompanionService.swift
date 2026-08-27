@@ -46,6 +46,8 @@ public final class CompanionService {
                 micOps: CompanionServer.MicOps? = nil,
                 audioStatus: (@Sendable () async -> Data?)? = nil,
                 system: (@Sendable () async -> CompanionSystemDTO)? = nil,
+                audioOutputs: (@Sendable () async -> CompanionAudioOutputsDTO)? = nil,
+                setAudioOutput: (@Sendable (String) async -> Bool)? = nil,
                 clipboardOps: CompanionServer.ClipboardOps? = nil,
                 onAuthorize: (@Sendable (String) -> Void)? = nil,
                 onDeviceUnpaired: (@Sendable (String) -> Void)? = nil,
@@ -123,6 +125,8 @@ public final class CompanionService {
             micOps: micOps,
             audioStatus: audioStatus,
             system: system,
+            audioOutputs: audioOutputs,
+            setAudioOutput: setAudioOutput,
             clipboardOps: clipboardOps,
             onLog: onLog,
             onListening: onListening)
