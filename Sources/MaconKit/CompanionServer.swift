@@ -322,6 +322,9 @@ public final class CompanionServer: @unchecked Sendable {
     private let micOps: MicOps?
     /// Encoded CompanionAudioStatusDTO for GET /audio/status (nil = 404).
     private let audioStatus: (@Sendable () async -> Data?)?
+    /// The Mac's vitals for GET /system (nil = 404, and the device's vitals
+    /// tiles say the Mac needs updating).
+    private let system: (@Sendable () async -> CompanionSystemDTO)?
     /// Universal clipboard (nil disables the /clipboard routes).
     private let clipboardOps: ClipboardOps?
     /// The live /mic connection, so a new source can evict it (last wins).
@@ -367,6 +370,7 @@ public final class CompanionServer: @unchecked Sendable {
                 audio: AudioBroadcaster? = nil,
                 micOps: MicOps? = nil,
                 audioStatus: (@Sendable () async -> Data?)? = nil,
+                system: (@Sendable () async -> CompanionSystemDTO)? = nil,
                 clipboardOps: ClipboardOps? = nil,
                 onLog: @escaping @Sendable (String) -> Void,
                 onListening: @escaping @Sendable (Bool) -> Void = { _ in }) {
@@ -406,6 +410,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.audio = audio
         self.micOps = micOps
         self.audioStatus = audioStatus
+        self.system = system
         self.clipboardOps = clipboardOps
         self.onLog = onLog
         self.onListening = onListening
@@ -646,6 +651,14 @@ public final class CompanionServer: @unchecked Sendable {
         if method == "GET", path == "/audio/status" {
             guard let audioStatus else { respond(conn, "404 Not Found", json: nil); return }
             Task { self.respond(conn, "200 OK", json: await audioStatus()) }
+            return
+        }
+
+        // GET /system — the Mac's vitals (CPU, memory, disk, battery, thermal)
+        // for the deck's live tiles. Polled, so everything behind it is cheap.
+        if method == "GET", path == "/system" {
+            guard let system else { respond(conn, "404 Not Found", json: nil); return }
+            Task { self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(await system())) }
             return
         }
 

@@ -199,6 +199,45 @@ public struct CompanionAIProvidersDTO: Codable, Sendable {
     public init(providers: [CompanionAIProviderDTO]) { self.providers = providers }
 }
 
+/// The Mac's own weather report (`GET /system`): what the vitals tiles on a
+/// device show. Everything here is cheap to read — the endpoint is polled.
+public struct CompanionSystemDTO: Codable, Sendable {
+    /// Whole-machine CPU load, 0…1, averaged since the previous ask (the first
+    /// ask answers with the average since boot, which settles by the second).
+    public var cpu: Double
+    /// Memory in use the way Activity Monitor counts it (app + wired +
+    /// compressed), and the machine's total, in bytes.
+    public var memUsed: Int64
+    public var memTotal: Int64
+    /// The boot volume's free space as purgeable-aware "available for use".
+    public var diskFree: Int64
+    public var diskTotal: Int64
+    /// 0…1, nil on a desktop with no battery.
+    public var battery: Double?
+    public var charging: Bool?
+    public var onAC: Bool
+    /// ProcessInfo's thermal state: nominal | fair | serious | critical.
+    public var thermal: String
+    /// Seconds since boot.
+    public var uptime: Double
+
+    public init(cpu: Double, memUsed: Int64, memTotal: Int64,
+                diskFree: Int64, diskTotal: Int64,
+                battery: Double?, charging: Bool?, onAC: Bool,
+                thermal: String, uptime: Double) {
+        self.cpu = cpu
+        self.memUsed = memUsed
+        self.memTotal = memTotal
+        self.diskFree = diskFree
+        self.diskTotal = diskTotal
+        self.battery = battery
+        self.charging = charging
+        self.onAC = onAC
+        self.thermal = thermal
+        self.uptime = uptime
+    }
+}
+
 public struct CompanionPowerDTO: Codable, Sendable {
     public var locked: Bool            // login/lock window is up
     public var displayAsleep: Bool     // the display has slept

@@ -95,9 +95,15 @@ public struct CompanionAudioStatusDTO: Codable, Sendable {
     /// >0 means real audio is reaching the encoder; 0 while something plays
     /// means the capture/loopback is silent.
     public var capturePeak: Double
+    /// The default output device's current volume (0…1) and mute, so a remote
+    /// slider can open where the Mac actually is instead of where it last left
+    /// it. Nil when the device doesn't expose a main volume.
+    public var volume: Double?
+    public var muted: Bool?
 
     public init(driverActive: Bool, audioAllowed: Bool, micAllowed: Bool,
-                mode: String, listeners: Int, micLive: Bool, capturePeak: Double = 0) {
+                mode: String, listeners: Int, micLive: Bool, capturePeak: Double = 0,
+                volume: Double? = nil, muted: Bool? = nil) {
         self.driverActive = driverActive
         self.audioAllowed = audioAllowed
         self.micAllowed = micAllowed
@@ -105,5 +111,7 @@ public struct CompanionAudioStatusDTO: Codable, Sendable {
         self.listeners = listeners
         self.micLive = micLive
         self.capturePeak = capturePeak
+        self.volume = volume
+        self.muted = muted
     }
 }
