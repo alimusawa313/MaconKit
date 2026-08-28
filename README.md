@@ -144,7 +144,7 @@ For the tip of `main` instead of the last release, `brew install --HEAD macon`.
 
 ## Where this repo comes from
 
-`MaconKit` is the open core of [MacOn](https://macon.devopsinstitute.id): the
+`MaconKit` is the open core of [MacOn](https://macon.id): the
 pipeline engine, the companion server, and the `macon` CLI. It's developed
 alongside the Mac app and published here on every release, with its history
 intact — so what you install is what you can read.
