@@ -642,7 +642,13 @@ case "companion":
             let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short
             print("Paired devices (\(devices.count)):")
             for d in devices {
+                // Expiry is idle-based, so show when it was last used and when
+                // it lapses if nothing touches it again.
+                let idle = Date().timeIntervalSince(d.lastSeen)
+                let expires = d.lastSeen.addingTimeInterval(PairingStore.idleWindow)
+                let last = idle < 120 ? "just now" : "\(Int(idle / 3600))h ago"
                 print("  • \(d.name)  ·  token \(d.tokenShort)…  ·  paired \(f.string(from: d.pairedAt))")
+                print("      last used \(last)  ·  expires if unused by \(f.string(from: expires))")
             }
         }
     case "revoke":
