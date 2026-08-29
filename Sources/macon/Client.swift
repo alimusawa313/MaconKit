@@ -3,15 +3,25 @@
 //  macon
 //
 //  Client-mode commands: talk to a running companion server (the app's or a
-//  `macon watch --companion`) over HTTP — status, logs, trigger, cancel.
+//  `macon watch --companion`) over HTTPS — status, logs, trigger, cancel.
 //  Auth is the same bearer token a paired iPhone uses. Against a local server
 //  the CLI pairs itself through the shared on-disk PairingStore; against a
 //  remote one (tunnel, EC2 Mac) use `macon pair --host H --code C` once.
+//
+//  Transport: a tunnel domain has a real certificate and is checked against the
+//  public CA set. A Mac on the local network presents its own self-signed one
+//  (LANIdentity), so there the certificate is pinned instead: exactly the one we
+//  were told to expect, or nothing. On this same Mac the pin is read straight
+//  out of the identity file; for another Mac `macon pair` records it, or pass
+//  --pin. Otherwise a token would ride the local network in the clear, which is
+//  the whole point of the LAN listener speaking TLS.
 //
 
 import Foundation
 import CoreGraphics
 import ApplicationServices
+import CryptoKit
+import Security
 import MaconKit
 
 // MARK: - Remote server access
@@ -29,20 +39,12 @@ enum Remote {
         return "localhost:\(option("port") ?? "8899")"
     }
 
-    /// Plain HTTP for LAN-ish hosts, HTTPS for real domains (tunnels). Same
-    /// heuristic as the companion app; --http / --https force it.
+    /// HTTPS everywhere now: the companion port speaks TLS on every interface.
+    /// --http is kept for talking to a Mac from before that change.
     static var secure: Bool {
         if flag("https") { return true }
         if flag("http") { return false }
-        if let h = option("host") {
-            if h.hasPrefix("https://") { return true }
-            if h.hasPrefix("http://") { return false }
-        }
-        let bare = host.split(separator: ":").first.map(String.init) ?? host
-        if bare == "localhost" || bare.hasSuffix(".local") { return false }
-        let parts = bare.split(separator: ".")
-        if parts.count == 4, parts.allSatisfy({ UInt8($0) != nil }) { return false }
-        if !bare.contains(".") { return false }
+        if let h = option("host"), h.hasPrefix("http://") { return false }
         return true
     }
 
@@ -51,6 +53,85 @@ enum Remote {
         return bare == "localhost" || bare == "127.0.0.1"
             || bare == ProcessInfo.processInfo.hostName || bare.hasSuffix(".local")
     }
+
+    /// A Mac on the local network (or this one) rather than a tunnel domain.
+    /// Those present a self-signed certificate, so they are pinned; a real
+    /// domain is checked the ordinary way.
+    static var isLANish: Bool {
+        let bare = host.split(separator: ":").first.map(String.init) ?? host
+        if bare == "localhost" || bare == "127.0.0.1" || bare.hasSuffix(".local") { return true }
+        let parts = bare.split(separator: ".")
+        if parts.count == 4, parts.allSatisfy({ UInt8($0) != nil }) { return true }
+        return !bare.contains(".")
+    }
+
+    // MARK: LAN certificate pinning
+
+    private static func pinAccount(_ h: String) -> String { "cli.pin.\(h.lowercased())" }
+
+    /// The certificate we expect on the LAN: --pin, else one recorded by a
+    /// previous `macon pair`, else (on this same Mac) the identity file itself.
+    static func expectedPin() -> String? {
+        guard isLANish else { return nil }
+        if let pin = option("pin") { return pin }
+        let stored = Keychain.get(account: pinAccount(host))
+        if !stored.isEmpty { return stored }
+        if isLocalHost { return LANIdentity.pin() }
+        return nil
+    }
+
+    static func storePin(_ pin: String) { Keychain.set(pin, account: pinAccount(host)) }
+
+    /// Accepts the LAN certificate only if it is byte-for-byte the expected one.
+    /// There is no CA to fall back on and the address is an IP or a .local name,
+    /// so a pin is the only thing that means anything here.
+    final class PinnedTrust: NSObject, URLSessionDelegate, @unchecked Sendable {
+        let expected: String?
+        /// First sight: accept whatever is offered and remember it, so
+        /// `macon pair` can record a pin and check it against what the pairing
+        /// response says it should be.
+        let trustOnFirstUse: Bool
+        private(set) var observed: String?
+        private(set) var mismatched = false
+
+        init(expected: String?, trustOnFirstUse: Bool) {
+            self.expected = expected
+            self.trustOnFirstUse = trustOnFirstUse
+        }
+
+        func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+            guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+                  let trust = challenge.protectionSpace.serverTrust else {
+                completionHandler(.performDefaultHandling, nil); return
+            }
+            // A tunnel domain has a real chain: let the system judge it.
+            guard Remote.isLANish else { completionHandler(.performDefaultHandling, nil); return }
+            guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
+                  let leaf = chain.first else {
+                completionHandler(.cancelAuthenticationChallenge, nil); return
+            }
+            let seen = Data(SHA256.hash(data: SecCertificateCopyData(leaf) as Data)).base64EncodedString()
+            observed = seen
+            if let expected {
+                if seen == expected { completionHandler(.useCredential, URLCredential(trust: trust)) }
+                else { mismatched = true; completionHandler(.cancelAuthenticationChallenge, nil) }
+            } else if trustOnFirstUse {
+                completionHandler(.useCredential, URLCredential(trust: trust))
+            } else {
+                completionHandler(.cancelAuthenticationChallenge, nil)
+            }
+        }
+    }
+
+    static func makeSession(trustOnFirstUse: Bool) -> (session: URLSession, trust: PinnedTrust) {
+        let delegate = PinnedTrust(expected: expectedPin(), trustOnFirstUse: trustOnFirstUse)
+        return (URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil), delegate)
+    }
+
+    /// One session for the run. URLSession.shared cannot carry a delegate, and
+    /// the delegate is where the pin is checked.
+    private static let standard: (session: URLSession, trust: PinnedTrust) = makeSession(trustOnFirstUse: false)
 
     private static let tokenAccount = "cli.companion.token"
 
@@ -84,8 +165,10 @@ enum Remote {
     }
 
     static func request(_ path: String, method: String = "GET",
-                        body: Data? = nil, authed: Bool = true) async throws -> (Int, Data) {
+                        body: Data? = nil, authed: Bool = true,
+                        using: (session: URLSession, trust: PinnedTrust)? = nil) async throws -> (Int, Data) {
         guard let url = url(path) else { throw CLIError("Bad host: \(host)") }
+        let transport = using ?? standard
         var req = URLRequest(url: url)
         req.httpMethod = method
         req.httpBody = body
@@ -94,10 +177,9 @@ enum Remote {
         if authed { req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization") }
         let data: Data, resp: URLResponse
         do {
-            (data, resp) = try await URLSession.shared.data(for: req)
+            (data, resp) = try await transport.session.data(for: req)
         } catch {
-            throw CLIError("Can't reach \(host), \((error as? URLError)?.localizedDescription ?? "connection failed").\n"
-                           + "Is the app's companion server on, or a `macon watch --companion` running?")
+            throw CLIError(reachHint(error, trust: transport.trust))
         }
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
 
@@ -107,7 +189,7 @@ enum Remote {
             guard let fresh = selfPair() else { return (code, data) }
             var retry = req
             retry.setValue("Bearer \(fresh)", forHTTPHeaderField: "Authorization")
-            let (d2, r2) = try await URLSession.shared.data(for: retry)
+            let (d2, r2) = try await transport.session.data(for: retry)
             return ((r2 as? HTTPURLResponse)?.statusCode ?? 0, d2)
         }
         return (code, data)
@@ -117,6 +199,29 @@ enum Remote {
         let (code, data) = try await request(path)
         guard code == 200 else { throw CLIError(httpHint(code)) }
         return try CompanionJSON.decoder.decode(T.self, from: data)
+    }
+
+    /// Why we could not connect, said usefully. A refused pin looks exactly like
+    /// an unreachable host from the outside, and the fix is completely different.
+    private static func reachHint(_ error: Error, trust: PinnedTrust) -> String {
+        if trust.mismatched {
+            return """
+            The Mac at \(host) presented a different certificate than the one on record.
+            Expected \(trust.expected ?? "?")
+            Got      \(trust.observed ?? "?")
+            Either its certificate was regenerated (pair again, or pass --pin with the new
+            value from Settings → Companion), or something is sitting between you and it.
+            """
+        }
+        if isLANish, expectedPin() == nil {
+            return """
+            Can't verify \(host): a Mac on the local network serves the companion over TLS
+            with its own certificate, and this CLI has no record of which one to expect.
+            Run: macon pair --host \(host) --code <CODE>   (records it), or pass --pin <value>.
+            """
+        }
+        return "Can't reach \(host), \((error as? URLError)?.localizedDescription ?? "connection failed").\n"
+            + "Is the app's companion server on, or a `macon watch --companion` running?"
     }
 
     static func httpHint(_ code: Int) -> String {
