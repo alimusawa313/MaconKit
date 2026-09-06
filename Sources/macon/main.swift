@@ -906,11 +906,19 @@ case "validate":
         exit(0)
     }
 
+case "mcp":
+    // macon mcp — this Mac as an MCP server on stdio, for Claude and anything
+    // else that speaks the protocol. A client of the companion server, so it
+    // inherits its gates rather than going around them.
+    await MCPServer.run()
+    exit(0)
+
 case "help", "--help", "-h":
     print("""
     macon, local CI runner (MaconKit)
 
     Remote control (talks to a running server, the app's, or `watch --companion`):
+      mcp [--host H]               serve this Mac over MCP on stdio (for Claude)
       status [--host H] [--json]   pipelines + builds on the runner
       logs [pipeline|build] [--follow]
                                    print (or tail) a build's log; --follow exits 0/1 by result

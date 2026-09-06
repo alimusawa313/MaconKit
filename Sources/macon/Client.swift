@@ -175,11 +175,20 @@ enum Remote {
         req.timeoutInterval = 15
         if body != nil { req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         if authed { req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization") }
+        // The companion server answers with Connection: close, so a burst of
+        // calls (an assistant working through several tools) can meet a socket
+        // that is already going away. One retry turns that from a failure into
+        // a pause; a real outage still fails, just a moment later.
         let data: Data, resp: URLResponse
         do {
             (data, resp) = try await transport.session.data(for: req)
         } catch {
-            throw CLIError(reachHint(error, trust: transport.trust))
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+                (data, resp) = try await transport.session.data(for: req)
+            } catch {
+                throw CLIError(reachHint(error, trust: transport.trust))
+            }
         }
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
 
