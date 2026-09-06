@@ -78,6 +78,42 @@ public actor APNsSender {
         }
     }
 
+    /// A Live Activity push. `payload` is the whole body, already serialised:
+    /// `{"aps": {"event": "start" | "update" | "end", "content-state": …}}`, with
+    /// `attributes-type` and `attributes` on a start. The token is a
+    /// push-to-start token for a start and the card's own token otherwise;
+    /// the topic carries the liveactivity suffix Apple requires.
+    /// Returns nil on success, else a short human error (410 = drop the token).
+    @discardableResult
+    public func sendLiveActivity(deviceToken: String, sandbox: Bool, payload: Data) async -> String? {
+        guard let config, config.isComplete else { return "APNs not configured" }
+        let jwt: String
+        do { jwt = try providerToken(config) }
+        catch { return "Bad APNs key: \(error.localizedDescription)" }
+
+        let host = sandbox ? "api.sandbox.push.apple.com" : "api.push.apple.com"
+        guard let url = URL(string: "https://\(host)/3/device/\(deviceToken)") else {
+            return "Bad device token"
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("bearer \(jwt)", forHTTPHeaderField: "authorization")
+        req.setValue("\(config.topic).push-type.liveactivity", forHTTPHeaderField: "apns-topic")
+        req.setValue("liveactivity", forHTTPHeaderField: "apns-push-type")
+        req.setValue("10", forHTTPHeaderField: "apns-priority")
+        req.httpBody = payload
+
+        do {
+            let (respData, resp) = try await URLSession.shared.data(for: req)
+            guard let http = resp as? HTTPURLResponse else { return "No response" }
+            if http.statusCode == 200 { return nil }
+            let reason = String(data: respData, encoding: .utf8) ?? ""
+            return "APNs \(http.statusCode): \(reason)"
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
     // MARK: JWT (ES256)
 
     private func providerToken(_ config: Config) throws -> String {
