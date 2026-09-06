@@ -239,7 +239,11 @@ public struct CompanionSystemDTO: Codable, Sendable {
     /// 0…1, nil on a desktop with no battery.
     public var battery: Double?
     public var charging: Bool?
-    public var onAC: Bool
+    /// Spelled onAc, not onAC, on purpose: Foundation's snake_case
+    /// strategies do not round-trip a run of capitals. onAC encodes to
+    /// "on_ac" and then decodes back as onAc, which no longer matches,
+    /// so every client silently failed to read this whole payload.
+    public var onAc: Bool
     /// ProcessInfo's thermal state: nominal | fair | serious | critical.
     public var thermal: String
     /// Seconds since boot.
@@ -251,7 +255,7 @@ public struct CompanionSystemDTO: Codable, Sendable {
 
     public init(cpu: Double, memUsed: Int64, memTotal: Int64,
                 diskFree: Int64, diskTotal: Int64,
-                battery: Double?, charging: Bool?, onAC: Bool,
+                battery: Double?, charging: Bool?, onAc: Bool,
                 thermal: String, uptime: Double, brightness: Double? = nil) {
         self.cpu = cpu
         self.memUsed = memUsed
@@ -260,7 +264,7 @@ public struct CompanionSystemDTO: Codable, Sendable {
         self.diskTotal = diskTotal
         self.battery = battery
         self.charging = charging
-        self.onAC = onAC
+        self.onAc = onAc
         self.thermal = thermal
         self.uptime = uptime
         self.brightness = brightness
@@ -276,7 +280,10 @@ public struct CompanionPowerDTO: Codable, Sendable {
     public var mac: String?            // primary NIC MAC, for Wake-on-LAN
     public var broadcast: String?      // subnet broadcast address, for WoL
     public var privacyUp: Bool         // the privacy curtain is currently raised
-    public var onACPower: Bool         // running on AC power (lid-closed capture needs it)
+    /// Running on AC power (lid-closed capture needs it). Spelled onAcPower
+    /// for the same round-trip reason as onAc above; as an optional this one
+    /// decoded to nil rather than failing, which is quieter and worse.
+    public var onAcPower: Bool
     /// macOS grants these to a signed binary and takes them away again when the
     /// binary changes: rebuild the app and both are gone until someone re-ticks
     /// them. Without Accessibility the Mac cannot type its own password, and
@@ -291,14 +298,14 @@ public struct CompanionPowerDTO: Codable, Sendable {
     public var keyRepeatInterval: Double?
     public init(locked: Bool, displayAsleep: Bool, keepAwake: Bool,
                 canWake: Bool, canUnlock: Bool, mac: String?, broadcast: String?,
-                privacyUp: Bool = false, onACPower: Bool = true,
+                privacyUp: Bool = false, onAcPower: Bool = true,
                 accessibility: Bool? = nil, screenRecording: Bool? = nil,
                 keyRepeatDelay: Double? = nil, keyRepeatInterval: Double? = nil) {
         self.locked = locked; self.displayAsleep = displayAsleep; self.keepAwake = keepAwake
         self.canWake = canWake; self.canUnlock = canUnlock
         self.mac = mac; self.broadcast = broadcast
         self.privacyUp = privacyUp
-        self.onACPower = onACPower
+        self.onAcPower = onAcPower
         self.accessibility = accessibility
         self.screenRecording = screenRecording
         self.keyRepeatDelay = keyRepeatDelay
