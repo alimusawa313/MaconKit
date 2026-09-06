@@ -1001,6 +1001,21 @@ public final class CompanionServer: @unchecked Sendable {
             return
         }
 
+        // POST /control/once — one control event, applied and answered. The
+        // WebSocket at /control is right for a device that is driving the Mac
+        // continuously; a watch firing a single shortcut should not have to
+        // hold a socket open to do it. Same `control` sink, so the same
+        // allowControl gate decides, and the same events are understood.
+        if method == "POST", segs.count == 2, segs[0] == "control", segs[1] == "once" {
+            guard let control else { respond(conn, "404 Not Found", json: nil); return }
+            guard let event = try? CompanionJSON.decoder.decode(ControlEvent.self, from: body) else {
+                respond(conn, "400 Bad Request", json: nil); return
+            }
+            control(event)
+            respond(conn, "200 OK", json: nil)
+            return
+        }
+
         // POST /open — open a web address in the Mac's default browser. Body
         // {"url": "https://…"}; http(s) only. Remote control must be on.
         if method == "POST", path == "/open" {
