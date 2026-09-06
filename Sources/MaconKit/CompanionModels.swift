@@ -363,6 +363,40 @@ public struct CompanionCodeListDTO: Codable, Sendable {
     }
 }
 
+/// One entry as the Files app needs it: everything `/code/list` carries, plus
+/// the two facts a file provider cannot work without. `modified` drives change
+/// detection, and `version` is the tag the provider compares to decide whether
+/// its copy is stale, so it must change whenever the bytes do.
+public struct CompanionFileEntryDTO: Codable, Sendable {
+    public var name: String
+    public var path: String
+    public var dir: Bool
+    public var size: Int64
+    /// Seconds since 1970, the one date format everything on the way agrees on.
+    public var modified: Double
+    /// Opaque, and only ever compared for equality: size and mtime together.
+    public var version: String
+    public init(name: String, path: String, dir: Bool, size: Int64,
+                modified: Double, version: String) {
+        self.name = name; self.path = path; self.dir = dir
+        self.size = size; self.modified = modified; self.version = version
+    }
+}
+
+/// A directory as the Files app sees it (`GET /files/list?path=`). Unlike the
+/// code editor's listing this keeps hidden entries out but keeps every file
+/// type in, because a file browser that hides what it cannot preview is a
+/// file browser people stop trusting.
+public struct CompanionFileListDTO: Codable, Sendable {
+    public var path: String
+    /// The parent's home-relative path, or nil at the home directory itself.
+    public var parent: String?
+    public var entries: [CompanionFileEntryDTO]
+    public init(path: String, parent: String?, entries: [CompanionFileEntryDTO]) {
+        self.path = path; self.parent = parent; self.entries = entries
+    }
+}
+
 /// A text file's content (`GET /code/file?path=`, and the `PUT` body).
 public struct CompanionCodeFileDTO: Codable, Sendable {
     public var path: String

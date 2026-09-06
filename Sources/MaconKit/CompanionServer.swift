@@ -92,6 +92,30 @@ public final class CompanionServer: @unchecked Sendable {
 
     /// Native file access for the companion's Code editor (nil = the /code
     /// routes 404). Every op is gated by the app's "allow code" toggle.
+    /// The Mac's home folder for a paired device's Files app. Every closure
+    /// answers nil/false when the files toggle is off there, which the routes
+    /// turn into 403 rather than an empty listing.
+    public struct FileOps: Sendable {
+        public var list: @Sendable (String) async -> CompanionFileListDTO?
+        public var item: @Sendable (String) async -> CompanionFileEntryDTO?
+        public var read: @Sendable (String) async -> Data?
+        public var write: @Sendable (String, Data) async -> CompanionFileEntryDTO?
+        public var makeDirectory: @Sendable (String) async -> CompanionFileEntryDTO?
+        public var delete: @Sendable (String) async -> Bool
+        public var move: @Sendable (String, String) async -> CompanionFileEntryDTO?
+
+        public init(list: @escaping @Sendable (String) async -> CompanionFileListDTO?,
+                    item: @escaping @Sendable (String) async -> CompanionFileEntryDTO?,
+                    read: @escaping @Sendable (String) async -> Data?,
+                    write: @escaping @Sendable (String, Data) async -> CompanionFileEntryDTO?,
+                    makeDirectory: @escaping @Sendable (String) async -> CompanionFileEntryDTO?,
+                    delete: @escaping @Sendable (String) async -> Bool,
+                    move: @escaping @Sendable (String, String) async -> CompanionFileEntryDTO?) {
+            self.list = list; self.item = item; self.read = read; self.write = write
+            self.makeDirectory = makeDirectory; self.delete = delete; self.move = move
+        }
+    }
+
     public struct CodeOps: Sendable {
         public var list: @Sendable (String) async -> CompanionCodeListDTO?
         public var read: @Sendable (String) async -> CompanionCodeFileDTO?
@@ -347,6 +371,8 @@ public final class CompanionServer: @unchecked Sendable {
     /// Open a web address in the Mac's default browser (the share sheet and
     /// Shortcuts). Answers false when remote control is off.
     private let openURL: (@Sendable (_ url: String) async -> Bool)?
+    /// The Files-app view of the Mac's home folder (nil disables /files).
+    private let fileOps: FileOps?
     /// The dictate-to-drive Mac agent (nil disables the /agent routes).
     private let agentOps: AgentOps?
     /// Live voice mode: one conversation turn → { say, task? }. Nil = 404.
@@ -401,6 +427,7 @@ public final class CompanionServer: @unchecked Sendable {
                 aiModels: (@Sendable () async -> Data?)? = nil,
                 aiProviders: (@Sendable () async -> Data?)? = nil,
                 aiChat: (@Sendable (_ body: Data, _ emit: @escaping @Sendable (Data) -> Void) async -> Void)? = nil,
+                fileOps: FileOps? = nil,
                 codeOps: CodeOps? = nil,
                 termOps: TermOps? = nil,
                 flowOps: FlowOps? = nil,
@@ -450,6 +477,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.devices = devices
         self.apnsRegister = apnsRegister
         self.openURL = openURL
+        self.fileOps = fileOps
         self.agentOps = agentOps
         self.voiceTurn = voiceTurn
         self.voiceTTS = voiceTTS
@@ -1192,6 +1220,101 @@ public final class CompanionServer: @unchecked Sendable {
         }
 
         // /code — native file browsing/editing for the companion's Code screen.
+        // /files/* — the Mac's home folder for a paired device's Files app.
+        // Same home sandbox and same toggle as /code; this one carries every
+        // file type and can create, move and delete.
+        if segs.first == "files" {
+            guard let fileOps else { respond(conn, "404 Not Found", json: nil); return }
+
+            // GET /files/list?path= — a directory (path empty = home).
+            if method == "GET", segs.count == 2, segs[1] == "list" {
+                let path = query["path"] ?? "~"
+                Task {
+                    if let dto = await fileOps.list(path) {
+                        self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(dto))
+                    } else { self.respond(conn, "403 Forbidden", json: nil) }
+                }
+                return
+            }
+
+            // GET /files/item?path= — one item's metadata, for a refresh.
+            if method == "GET", segs.count == 2, segs[1] == "item" {
+                guard let path = query["path"] else { respond(conn, "400 Bad Request", json: nil); return }
+                Task {
+                    if let dto = await fileOps.item(path) {
+                        self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(dto))
+                    } else { self.respond(conn, "404 Not Found", json: nil) }
+                }
+                return
+            }
+
+            // GET /files/blob?path= — the raw bytes, whatever kind of file.
+            if method == "GET", segs.count == 2, segs[1] == "blob" {
+                guard let path = query["path"] else { respond(conn, "400 Bad Request", json: nil); return }
+                Task {
+                    if let data = await fileOps.read(path) {
+                        self.respondData(conn, "200 OK", contentType: "application/octet-stream", data: data)
+                    } else { self.respond(conn, "404 Not Found", json: nil) }
+                }
+                return
+            }
+
+            // PUT /files/blob?path= — write the body, creating if needed.
+            if method == "PUT", segs.count == 2, segs[1] == "blob" {
+                guard let path = query["path"] else { respond(conn, "400 Bad Request", json: nil); return }
+                Task {
+                    if let dto = await fileOps.write(path, body) {
+                        self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(dto))
+                    } else { self.respond(conn, "403 Forbidden", json: nil) }
+                }
+                return
+            }
+
+            // POST /files/mkdir  {"path": "~/New Folder"}
+            if method == "POST", segs.count == 2, segs[1] == "mkdir" {
+                struct Body: Decodable { var path: String }
+                guard let b = try? CompanionJSON.decoder.decode(Body.self, from: body) else {
+                    respond(conn, "400 Bad Request", json: nil); return
+                }
+                Task {
+                    if let dto = await fileOps.makeDirectory(b.path) {
+                        self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(dto))
+                    } else { self.respond(conn, "403 Forbidden", json: nil) }
+                }
+                return
+            }
+
+            // POST /files/delete  {"path": "~/x"} — to the Trash, not gone.
+            if method == "POST", segs.count == 2, segs[1] == "delete" {
+                struct Body: Decodable { var path: String }
+                guard let b = try? CompanionJSON.decoder.decode(Body.self, from: body) else {
+                    respond(conn, "400 Bad Request", json: nil); return
+                }
+                Task {
+                    let ok = await fileOps.delete(b.path)
+                    self.respond(conn, ok ? "200 OK" : "403 Forbidden", json: nil)
+                }
+                return
+            }
+
+            // POST /files/move  {"from": "~/a", "to": "~/b"} — rename or move.
+            if method == "POST", segs.count == 2, segs[1] == "move" {
+                struct Body: Decodable { var from: String; var to: String }
+                guard let b = try? CompanionJSON.decoder.decode(Body.self, from: body) else {
+                    respond(conn, "400 Bad Request", json: nil); return
+                }
+                Task {
+                    if let dto = await fileOps.move(b.from, b.to) {
+                        self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(dto))
+                    } else { self.respond(conn, "403 Forbidden", json: nil) }
+                }
+                return
+            }
+
+            respond(conn, "404 Not Found", json: nil)
+            return
+        }
+
         if segs.first == "code" {
             guard let codeOps else { respond(conn, "404 Not Found", json: nil); return }
 
