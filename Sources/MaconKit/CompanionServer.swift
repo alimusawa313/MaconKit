@@ -344,6 +344,9 @@ public final class CompanionServer: @unchecked Sendable {
     /// Push: a device hands the Mac its APNs token so build alerts reach it.
     /// The bearer token identifies which paired device; body is opaque.
     private let apnsRegister: (@Sendable (_ bearer: String, _ body: Data) async -> Bool)?
+    /// Open a web address in the Mac's default browser (the share sheet and
+    /// Shortcuts). Answers false when remote control is off.
+    private let openURL: (@Sendable (_ url: String) async -> Bool)?
     /// The dictate-to-drive Mac agent (nil disables the /agent routes).
     private let agentOps: AgentOps?
     /// Live voice mode: one conversation turn → { say, task? }. Nil = 404.
@@ -403,6 +406,7 @@ public final class CompanionServer: @unchecked Sendable {
                 flowOps: FlowOps? = nil,
                 devices: (@Sendable () async -> Data?)? = nil,
                 apnsRegister: (@Sendable (_ bearer: String, _ body: Data) async -> Bool)? = nil,
+                openURL: (@Sendable (_ url: String) async -> Bool)? = nil,
                 agentOps: AgentOps? = nil,
                 voiceTurn: (@Sendable (CompanionVoiceTurnRequestDTO) async -> CompanionVoiceTurnResponseDTO?)? = nil,
                 voiceTTS: (@Sendable (String) async -> Data?)? = nil,
@@ -445,6 +449,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.flowOps = flowOps
         self.devices = devices
         self.apnsRegister = apnsRegister
+        self.openURL = openURL
         self.agentOps = agentOps
         self.voiceTurn = voiceTurn
         self.voiceTTS = voiceTTS
@@ -964,6 +969,23 @@ public final class CompanionServer: @unchecked Sendable {
                 if let data = await devices() {
                     self.respond(conn, "200 OK", json: data)
                 } else { self.respond(conn, "404 Not Found", json: nil) }
+            }
+            return
+        }
+
+        // POST /open — open a web address in the Mac's default browser. Body
+        // {"url": "https://…"}; http(s) only. Remote control must be on.
+        if method == "POST", path == "/open" {
+            guard let openURL else { respond(conn, "404 Not Found", json: nil); return }
+            struct Body: Decodable { var url: String }
+            guard let b = try? CompanionJSON.decoder.decode(Body.self, from: body),
+                  let url = URL(string: b.url),
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+                respond(conn, "400 Bad Request", json: nil); return
+            }
+            Task {
+                let ok = await openURL(b.url)
+                self.respond(conn, ok ? "200 OK" : "403 Forbidden", json: nil)
             }
             return
         }
