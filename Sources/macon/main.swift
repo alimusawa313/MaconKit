@@ -906,6 +906,14 @@ case "validate":
         exit(0)
     }
 
+case "hook":
+    // macon hook — the coding-agent hook (Claude Code, Codex) and its installer.
+    // Reports the agent's moments to the running app so a paired device gets a
+    // push, and holds a permission prompt for the phone's answer when the Mac
+    // says nobody is at the keyboard.
+    await runHook()
+    exit(0)
+
 case "mcp":
     // macon mcp — this Mac as an MCP server on stdio, for Claude and anything
     // else that speaks the protocol. A client of the companion server, so it
@@ -919,6 +927,10 @@ case "help", "--help", "-h":
 
     Remote control (talks to a running server, the app's, or `watch --companion`):
       mcp [--host H]               serve this Mac over MCP on stdio (for Claude)
+      hook <install|uninstall|status> [claude|codex]
+                                   wire Claude Code / Codex into the companion: a paired
+                                   device sees the session, gets a push when the agent
+                                   waits, and can answer the prompt
       status [--host H] [--json]   pipelines + builds on the runner
       logs [pipeline|build] [--follow]
                                    print (or tail) a build's log; --follow exits 0/1 by result

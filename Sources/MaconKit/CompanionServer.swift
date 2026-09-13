@@ -33,6 +33,11 @@
 //    GET  /audio/status         (Bearer)   driver + consent state for media I/O
 //    GET  /clipboard?after=N    (Bearer)   the Mac's latest clipboard item (universal copy & paste)
 //    POST /clipboard            (Bearer)   set the Mac's clipboard from a device
+//    POST /coding-agents/hook   (Bearer)   a coding agent (Claude Code, Codex) reports a moment
+//    GET  /coding-agents        (Bearer)   the agent sessions on this Mac and their prompts
+//    GET  /coding-agents/{id}/decision?seq=N&wait=S  (Bearer)  the hook long-polls for an answer
+//    POST /coding-agents/{id}/decision  (Bearer)  a device answers a prompt {seq, allow}
+//    DELETE /coding-agents/{id} (Bearer)   forget a session
 //
 //  Two listeners, because the two ways in have different protection:
 //
@@ -253,6 +258,28 @@ public final class CompanionServer: @unchecked Sendable {
         }
     }
 
+    /// Coding agents on this Mac (nil = the /coding-agents routes 404). The
+    /// hook route is open to any paired token, the CLI's included; whether a
+    /// device may SEE sessions and ANSWER prompts is the app's toggle, which
+    /// `list`/`decide` report as nil/false → 403.
+    public struct CodingAgentOps: Sendable {
+        public var hook: @Sendable (CodingAgentHookEvent) async -> CodingAgentHookResponse
+        public var waitDecision: @Sendable (String, Int, TimeInterval) async -> CodingAgentHookResponse
+        public var list: @Sendable () async -> CompanionCodingAgentsDTO?
+        /// nil = feature off (403); false = no such prompt (404).
+        public var decide: @Sendable (String, CompanionCodingAgentDecisionDTO) async -> Bool?
+        public var remove: @Sendable (String) async -> Bool
+
+        public init(hook: @escaping @Sendable (CodingAgentHookEvent) async -> CodingAgentHookResponse,
+                    waitDecision: @escaping @Sendable (String, Int, TimeInterval) async -> CodingAgentHookResponse,
+                    list: @escaping @Sendable () async -> CompanionCodingAgentsDTO?,
+                    decide: @escaping @Sendable (String, CompanionCodingAgentDecisionDTO) async -> Bool?,
+                    remove: @escaping @Sendable (String) async -> Bool) {
+            self.hook = hook; self.waitDecision = waitDecision; self.list = list
+            self.decide = decide; self.remove = remove
+        }
+    }
+
     /// One inbound terminal frame: keystrokes (base64) or a resize.
     private struct TermInbound: Decodable {
         let t: String            // "in" | "size" | "kill"
@@ -395,6 +422,8 @@ public final class CompanionServer: @unchecked Sendable {
     private let setAudioOutput: (@Sendable (String) async -> Bool)?
     /// Universal clipboard (nil disables the /clipboard routes).
     private let clipboardOps: ClipboardOps?
+    /// Coding agents (nil disables the /coding-agents routes).
+    private let codingAgentOps: CodingAgentOps?
     /// The live /mic connection, so a new source can evict it (last wins).
     private let micLock = NSLock()
     private var micConn: NWConnection?
@@ -444,6 +473,7 @@ public final class CompanionServer: @unchecked Sendable {
                 audioOutputs: (@Sendable () async -> CompanionAudioOutputsDTO)? = nil,
                 setAudioOutput: (@Sendable (String) async -> Bool)? = nil,
                 clipboardOps: ClipboardOps? = nil,
+                codingAgentOps: CodingAgentOps? = nil,
                 onLog: @escaping @Sendable (String) -> Void,
                 onListening: @escaping @Sendable (Bool) -> Void = { _ in }) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8899
@@ -488,6 +518,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.audioOutputs = audioOutputs
         self.setAudioOutput = setAudioOutput
         self.clipboardOps = clipboardOps
+        self.codingAgentOps = codingAgentOps
         self.onLog = onLog
         self.onListening = onListening
     }
@@ -952,6 +983,79 @@ public final class CompanionServer: @unchecked Sendable {
                     self.respond(conn, "200 OK", json: ack)
                 } else { self.respond(conn, "403 Forbidden", json: nil) }
             }
+            return
+        }
+
+        // /coding-agents — Claude Code / Codex sessions on this Mac.
+        if segs.first == "coding-agents" {
+            guard let ops = codingAgentOps else { respond(conn, "404 Not Found", json: nil); return }
+
+            // POST /coding-agents/hook — a hook reports a moment. Any paired
+            // token may (the CLI self-pairs); this is the agent talking, not a
+            // device acting on the Mac.
+            if method == "POST", segs.count == 2, segs[1] == "hook" {
+                guard let event = try? CompanionJSON.decoder.decode(CodingAgentHookEvent.self, from: body) else {
+                    respond(conn, "400 Bad Request", json: nil); return
+                }
+                Task {
+                    let resp = await ops.hook(event)
+                    self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(resp))
+                }
+                return
+            }
+
+            // GET /coding-agents — the sessions (403 when the toggle is off).
+            if method == "GET", segs.count == 1 {
+                Task {
+                    if let dto = await ops.list() {
+                        self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(dto))
+                    } else { self.respond(conn, "403 Forbidden", json: nil) }
+                }
+                return
+            }
+
+            // GET /coding-agents/{id}/decision?seq=N&wait=S — the hook waits
+            // for a device's answer. The reply carries the answer when one
+            // arrived inside the wait, and `hold`, which turns false the
+            // moment somebody is back at the Mac.
+            if method == "GET", segs.count == 3, segs[2] == "decision" {
+                let id = segs[1]
+                guard let seq = Int(query["seq"] ?? "") else { respond(conn, "400 Bad Request", json: nil); return }
+                let wait = TimeInterval(Int(query["wait"] ?? "") ?? 10)
+                Task {
+                    let reply = await ops.waitDecision(id, seq, wait)
+                    self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(reply))
+                }
+                return
+            }
+
+            // POST /coding-agents/{id}/decision {seq, allow, message?}
+            if method == "POST", segs.count == 3, segs[2] == "decision" {
+                guard let decision = try? CompanionJSON.decoder.decode(CompanionCodingAgentDecisionDTO.self, from: body) else {
+                    respond(conn, "400 Bad Request", json: nil); return
+                }
+                let id = segs[1]
+                Task {
+                    switch await ops.decide(id, decision) {
+                    case .some(true):  self.respond(conn, "200 OK", json: nil)
+                    case .some(false): self.respond(conn, "404 Not Found", json: nil)
+                    case .none:        self.respond(conn, "403 Forbidden", json: nil)
+                    }
+                }
+                return
+            }
+
+            // DELETE /coding-agents/{id} — forget a session.
+            if method == "DELETE", segs.count == 2 {
+                let id = segs[1]
+                Task {
+                    let ok = await ops.remove(id)
+                    self.respond(conn, ok ? "200 OK" : "404 Not Found", json: nil)
+                }
+                return
+            }
+
+            respond(conn, "404 Not Found", json: nil)
             return
         }
 

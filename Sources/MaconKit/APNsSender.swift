@@ -43,7 +43,8 @@ public actor APNsSender {
     @discardableResult
     public func send(deviceToken: String, sandbox: Bool,
                      title: String, body: String,
-                     payload: [String: String]) async -> String? {
+                     payload: [String: String],
+                     category: String? = nil, threadID: String? = nil) async -> String? {
         guard let config, config.isComplete else { return "APNs not configured" }
         let jwt: String
         do { jwt = try providerToken(config) }
@@ -61,7 +62,12 @@ public actor APNsSender {
         req.setValue("10", forHTTPHeaderField: "apns-priority")
 
         var root: [String: Any] = payload
-        root["aps"] = ["alert": ["title": title, "body": body], "sound": "default"]
+        var aps: [String: Any] = ["alert": ["title": title, "body": body], "sound": "default"]
+        // A category names the action buttons the app registered for it; a
+        // thread id groups the pushes about one thing.
+        if let category { aps["category"] = category }
+        if let threadID { aps["thread-id"] = threadID }
+        root["aps"] = aps
         guard let data = try? JSONSerialization.data(withJSONObject: root) else {
             return "Bad payload"
         }

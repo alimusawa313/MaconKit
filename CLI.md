@@ -27,6 +27,8 @@ macon watch --config file.json    watch pipelines exported from the app
 macon service <install|…>         run a watch as a launchd service
 macon install-service […]         alias for `service install`
 macon companion <devices|…>       manage companion-app (iPhone/iPad) pairings
+macon hook <install|uninstall|status> [claude|codex]
+                                  let the companion watch and answer Claude Code / Codex
 macon completions <zsh|bash>      print shell completions
 
 Remote control — talks to a running runner (the app's, or `watch --companion`):
@@ -355,6 +357,50 @@ macon companion revoke-all          # revoke every device
 > builds, live logs, and pipeline status — the companion (and `macon status`
 > from another machine) can watch/run its pipelines, but the config itself is
 > fixed, and a headless runner has no display to capture or drive.
+
+---
+
+## `macon hook` — Claude Code and Codex on your phone
+
+A coding agent stops for two things: a permission prompt, and the end of its
+turn. `macon hook` puts both on your phone. It wires itself into the agent's
+own config, reports each moment to the MacOn app on this Mac, and the app pushes
+it to paired devices. In Macon+ the session shows up under **Code → Agents**,
+with the prompt and two buttons.
+
+```sh
+macon hook install            # Claude Code + Codex
+macon hook install claude     # just one of them
+macon hook status
+macon hook uninstall
+```
+
+Then, in the MacOn app: **Settings → Devices → Let paired devices answer coding
+agent prompts**. The same pane has Hook up / Remove buttons that do what the
+commands above do.
+
+What gets written:
+
+- **Claude Code**: entries in `~/.claude/settings.json` under `hooks` for
+  `SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `Notification`,
+  `Stop` and `SessionEnd`, each running `macon hook claude`. Everything else in
+  the file is left alone; `uninstall` removes only these.
+- **Codex**: `notify = ["macon", "hook", "codex"]` in `~/.codex/config.toml`.
+  Codex allows one notify command, so an existing one that is not MacOn's is
+  reported rather than replaced.
+
+How a prompt is answered from the phone: the `PermissionRequest` hook asks the
+app whether to **hold**. When somebody is at the Mac (keyboard or mouse touched
+in the last minute, screen unlocked and awake, nobody streaming it) the hook
+returns at once and Claude shows the dialog in the terminal as usual. When the
+Mac is idle, locked, asleep or being watched from a device, the hook waits for
+the phone's answer, for up to 25 minutes (`--hold-minutes N` changes that). The
+moment someone touches the Mac again the hold ends and the dialog appears in
+the terminal. A deny from the phone reaches Claude as a denial with the reason
+"Denied from a paired device via MacOn."
+
+The hook exits 0 whatever happens. If the app is not running there is nobody to
+tell, and the agent carries on exactly as it would without MacOn.
 
 ---
 
