@@ -105,8 +105,16 @@ import MaconKit
     switch name {
     case "SessionStart":
         event.kind = .start
-    case "UserPromptSubmit", "PostToolUse", "PostToolUseFailure":
+    case "UserPromptSubmit":
         event.kind = .working
+        event.message = (json["prompt"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    case "PreToolUse":
+        event.kind = .tool
+        let tool = json["tool_name"] as? String ?? "Tool"
+        event.prompt = describe(tool: tool, input: json["tool_input"] as? [String: Any] ?? [:])
+    case "PostToolUse", "PostToolUseFailure":
+        event.kind = .toolDone
+        event.message = resultLine(json["tool_response"])
     case "PermissionRequest":
         event.kind = .permission
         let tool = json["tool_name"] as? String ?? "Tool"
@@ -208,6 +216,27 @@ private func describe(tool: String, input: [String: Any]) -> CodingAgentHookEven
     return CodingAgentHookEvent.Prompt(tool: shownTool,
                                        summary: String(summary.prefix(400)),
                                        detail: detail.map { String($0.prefix(1200)) })
+}
+
+/// A tool's result, in one line: the first line of text, or a count.
+private func resultLine(_ response: Any?) -> String? {
+    func firstLine(_ s: String) -> String? {
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return nil }
+        let line = t.split(separator: "\n").first.map(String.init) ?? t
+        let extra = t.split(separator: "\n").count - 1
+        return extra > 0 ? "\(line.prefix(160)) (+\(extra) lines)" : String(line.prefix(200))
+    }
+    if let s = response as? String { return firstLine(s) }
+    if let d = response as? [String: Any] {
+        for key in ["stdout", "output", "result", "content", "message", "error"] {
+            if let s = d[key] as? String, let line = firstLine(s) { return line }
+        }
+        if let arr = d["content"] as? [[String: Any]], let s = arr.first?["text"] as? String { return firstLine(s) }
+        return d.isEmpty ? nil : "Done"
+    }
+    if let arr = response as? [Any] { return "\(arr.count) items" }
+    return nil
 }
 
 /// The agent's last words, from the tail of its transcript (JSONL, one

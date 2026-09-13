@@ -56,13 +56,36 @@ public struct CompanionCodingAgentDTO: Codable, Sendable, Identifiable, Hashable
     public var prompt: CompanionCodingAgentPromptDTO?
     /// Prompts answered from a device in this session.
     public var decisions: Int
+    /// What it is doing right now, one line ("Bash: git status"). Nil when idle.
+    public var activity: String?
+    /// The story so far, oldest first. Only on the detail route; the list
+    /// leaves it out to stay light.
+    public var events: [CompanionCodingAgentEventDTO]?
 
     public init(id: String, tool: String, project: String, cwd: String, state: String,
                 since: Date, startedAt: Date, lastMessage: String? = nil,
-                prompt: CompanionCodingAgentPromptDTO? = nil, decisions: Int = 0) {
+                prompt: CompanionCodingAgentPromptDTO? = nil, decisions: Int = 0,
+                activity: String? = nil, events: [CompanionCodingAgentEventDTO]? = nil) {
         self.id = id; self.tool = tool; self.project = project; self.cwd = cwd
         self.state = state; self.since = since; self.startedAt = startedAt
         self.lastMessage = lastMessage; self.prompt = prompt; self.decisions = decisions
+        self.activity = activity; self.events = events
+    }
+}
+
+/// One moment in a session's timeline.
+public struct CompanionCodingAgentEventDTO: Codable, Sendable, Hashable, Identifiable {
+    public var seq: Int
+    public var at: Date
+    /// start | prompt | tool | result | permission | decision | reply | note | end
+    public var kind: String
+    /// The line: the user's prompt, "Bash: git status", the reply's first sentence.
+    public var text: String
+    /// More, when there is more: the full command, the file contents, the reply.
+    public var detail: String?
+    public var id: Int { seq }
+    public init(seq: Int, at: Date = Date(), kind: String, text: String, detail: String? = nil) {
+        self.seq = seq; self.at = at; self.kind = kind; self.text = text; self.detail = detail
     }
 }
 
@@ -93,6 +116,10 @@ public struct CodingAgentHookEvent: Codable, Sendable {
         case permission
         /// A notification the agent raised (idle, needs input) — informational.
         case notification
+        /// The agent is about to run a tool (PreToolUse): what it is doing.
+        case tool
+        /// A tool finished (PostToolUse); `message` carries a short result.
+        case toolDone
         /// The agent finished its turn.
         case stop
         /// The session ended.
@@ -161,6 +188,9 @@ public final class CodingAgentHub: @unchecked Sendable {
 
     private let lock = NSLock()
     private var agents: [String: CompanionCodingAgentDTO] = [:]
+    /// Each session's timeline, capped; served by `detail`, never by `list`.
+    private var timelines: [String: [CompanionCodingAgentEventDTO]] = [:]
+    private var eventSeq = 0
     private var seq = 0
     /// Answers by "session#seq", kept until the hook collects them.
     private var answers: [String: CompanionCodingAgentDecisionDTO] = [:]
@@ -190,14 +220,38 @@ public final class CodingAgentHub: @unchecked Sendable {
             state: "running", since: now, startedAt: now)
         agent.tool = event.tool
         if !event.cwd.isEmpty { agent.cwd = event.cwd; agent.project = Self.projectName(event.cwd) }
+        var timeline = timelines[event.session] ?? []
+        func note(_ kind: String, _ text: String, _ detail: String? = nil) {
+            eventSeq += 1
+            timeline.append(CompanionCodingAgentEventDTO(seq: eventSeq, at: now, kind: kind,
+                                                          text: String(text.prefix(200)),
+                                                          detail: detail.map { String($0.prefix(2000)) }))
+            if timeline.count > 300 { timeline.removeFirst(timeline.count - 300) }
+        }
 
         switch event.kind {
         case .start:
             agent.state = "running"; agent.since = now; agent.prompt = nil
+            agent.activity = nil
+            note("start", "Session started")
         case .working:
             // A prompt that is still up was answered at the Mac: drop it.
-            if agent.prompt != nil { dropWaiters(for: agent) }
+            if agent.prompt != nil { dropWaiters(for: agent); note("decision", "Answered at the Mac") }
             agent.state = "running"; agent.since = now; agent.prompt = nil
+            if let message = event.message, !message.isEmpty {
+                agent.activity = "Thinking"
+                note("prompt", message, message.count > 200 ? message : nil)
+            }
+        case .tool:
+            if agent.prompt != nil { dropWaiters(for: agent); note("decision", "Answered at the Mac") }
+            let line = "\(event.prompt?.tool ?? "Tool"): \(event.prompt?.summary ?? "")"
+            agent.state = "running"; agent.since = now; agent.prompt = nil
+            agent.activity = line
+            note("tool", line, event.prompt?.detail)
+        case .toolDone:
+            agent.state = "running"; agent.prompt = nil
+            agent.activity = "Thinking"
+            if let message = event.message, !message.isEmpty { note("result", message) }
         case .permission:
             seq += 1
             let prompt = CompanionCodingAgentPromptDTO(
@@ -205,6 +259,8 @@ public final class CodingAgentHub: @unchecked Sendable {
                 summary: event.prompt?.summary ?? (event.message ?? ""),
                 detail: event.prompt?.detail, askedAt: now)
             agent.state = "waiting"; agent.since = now; agent.prompt = prompt
+            agent.activity = "Waiting for permission: \(prompt.tool)"
+            note("permission", "Wants to run \(prompt.tool): \(prompt.summary)", prompt.detail)
             response.seq = seq
             response.hold = shouldHold?() ?? true
             change = .waiting(agent)
@@ -223,19 +279,30 @@ public final class CodingAgentHub: @unchecked Sendable {
                 } else if lower.contains("waiting") || lower.contains("input") {
                     agent.state = "idle"; agent.since = now
                     agent.lastMessage = message
+                    agent.activity = nil
                     change = .finished(agent)
                 }
+                note("note", message)
             }
         case .stop:
             if agent.prompt != nil { dropWaiters(for: agent) }
             agent.state = "idle"; agent.since = now; agent.prompt = nil
-            if let message = event.message, !message.isEmpty { agent.lastMessage = message }
+            agent.activity = nil
+            if let message = event.message, !message.isEmpty {
+                agent.lastMessage = message
+                note("reply", message.split(separator: "\n").first.map(String.init) ?? message, message)
+            } else {
+                note("reply", "Finished its turn")
+            }
             change = .finished(agent)
         case .end:
             if agent.prompt != nil { dropWaiters(for: agent) }
             agent.state = "ended"; agent.since = now; agent.prompt = nil
+            agent.activity = nil
+            note("end", "Session ended")
         }
         agents[event.session] = agent
+        timelines[event.session] = timeline
         lock.unlock()
 
         onChange?(change)
@@ -325,6 +392,14 @@ public final class CodingAgentHub: @unchecked Sendable {
         return agents[id]
     }
 
+    /// One session with its timeline, for the detail screen.
+    public func detail(_ id: String) -> CompanionCodingAgentDTO? {
+        lock.lock(); defer { lock.unlock() }
+        guard var agent = agents[id] else { return nil }
+        agent.events = timelines[id] ?? []
+        return agent
+    }
+
     /// A device answered. False when the prompt is not the one still up.
     @discardableResult
     public func decide(session: String, _ decision: CompanionCodingAgentDecisionDTO) -> Bool {
@@ -336,7 +411,13 @@ public final class CodingAgentHub: @unchecked Sendable {
         agent.prompt = nil
         agent.state = "running"; agent.since = Date()
         agent.decisions += 1
+        agent.activity = decision.allow ? "Allowed from a device" : "Denied from a device"
         agents[session] = agent
+        eventSeq += 1
+        timelines[session, default: []].append(CompanionCodingAgentEventDTO(
+            seq: eventSeq, kind: "decision",
+            text: decision.allow ? "Allowed from your device" : "Denied from your device",
+            detail: decision.message))
         let pending = waiters.removeValue(forKey: key) ?? []
         if pending.isEmpty { answers[key] = decision }
         lock.unlock()
@@ -350,6 +431,7 @@ public final class CodingAgentHub: @unchecked Sendable {
     public func remove(_ id: String) -> Bool {
         lock.lock()
         guard let agent = agents.removeValue(forKey: id) else { lock.unlock(); return false }
+        timelines[id] = nil
         dropWaiters(for: agent)
         lock.unlock()
         onChange?(.updated)
@@ -368,8 +450,8 @@ public final class CodingAgentHub: @unchecked Sendable {
     private func prune(now: Date) {
         for (id, agent) in agents {
             let age = now.timeIntervalSince(agent.since)
-            if agent.state == "ended", age > endedRetention { agents[id] = nil }
-            else if age > staleRetention { agents[id] = nil }
+            if agent.state == "ended", age > endedRetention { agents[id] = nil; timelines[id] = nil }
+            else if age > staleRetention { agents[id] = nil; timelines[id] = nil }
         }
     }
 
@@ -420,8 +502,10 @@ public enum CodingAgentHooks {
     @discardableResult
     public static func repair(exe: String, port: Int?) -> [Agent] {
         var fixed: [Agent] = []
-        if claudeInstalled(), !claudeCommands().allSatisfy({ $0.hasPrefix(exe + " ") || $0 == exe }) {
-            if (try? installClaude(exe: exe, port: port)) != nil { fixed.append(.claude) }
+        if claudeInstalled() {
+            let pathsOff = !claudeCommands().allSatisfy { $0.hasPrefix(exe + " ") || $0 == exe }
+            let eventsOff = claudeHookedEvents() != Set(claudeEvents.map(\.event))
+            if pathsOff || eventsOff, (try? installClaude(exe: exe, port: port)) != nil { fixed.append(.claude) }
         }
         if codexInstalled(), let text = try? String(contentsOf: codexConfigURL, encoding: .utf8),
            !text.contains("\"\(exe)\"") {
@@ -513,9 +597,18 @@ public enum CodingAgentHooks {
     /// The hook events we listen on, and how long each may run. The
     /// permission one is the only long one: it is the hold for the phone.
     static let claudeEvents: [(event: String, timeout: Int)] = [
-        ("SessionStart", 10), ("UserPromptSubmit", 10), ("PermissionRequest", 1800),
-        ("Notification", 10), ("Stop", 10), ("SessionEnd", 10),
+        ("SessionStart", 10), ("UserPromptSubmit", 10), ("PreToolUse", 10), ("PostToolUse", 10),
+        ("PermissionRequest", 1800), ("Notification", 10), ("Stop", 10), ("SessionEnd", 10),
     ]
+
+    /// The hook events that carry one of our entries right now.
+    static func claudeHookedEvents() -> Set<String> {
+        guard let root = readJSON(claudeSettingsURL),
+              let hooks = root["hooks"] as? [String: Any] else { return [] }
+        return Set(hooks.compactMap { key, value in
+            ((value as? [[String: Any]]) ?? []).contains(where: isOurs) ? key : nil
+        })
+    }
 
     public static func claudeInstalled() -> Bool {
         guard let root = readJSON(claudeSettingsURL),
@@ -536,7 +629,7 @@ public enum CodingAgentHooks {
                 "hooks": [["type": "command", "command": command, "timeout": timeout]],
             ]
             // Claude wants a matcher on the tool-shaped events; empty = every tool.
-            if event == "PermissionRequest" { entry["matcher"] = "" }
+            if ["PermissionRequest", "PreToolUse", "PostToolUse"].contains(event) { entry["matcher"] = "" }
             entries.append(entry)
             hooks[event] = entries
         }

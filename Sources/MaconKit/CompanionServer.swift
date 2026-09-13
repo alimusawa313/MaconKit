@@ -37,6 +37,7 @@
 //    POST /clipboard            (Bearer)   set the Mac's clipboard from a device
 //    POST /coding-agents/hook   (Bearer)   a coding agent (Claude Code, Codex) reports a moment
 //    GET  /coding-agents        (Bearer)   the agent sessions on this Mac and their prompts
+//    GET  /coding-agents/{id}   (Bearer)   one session with its timeline
 //    GET  /coding-agents/{id}/decision?seq=N&wait=S  (Bearer)  the hook long-polls for an answer
 //    POST /coding-agents/{id}/decision  (Bearer)  a device answers a prompt {seq, allow}
 //    DELETE /coding-agents/{id} (Bearer)   forget a session
@@ -268,6 +269,9 @@ public final class CompanionServer: @unchecked Sendable {
         public var hook: @Sendable (CodingAgentHookEvent) async -> CodingAgentHookResponse
         public var waitDecision: @Sendable (String, Int, TimeInterval) async -> CodingAgentHookResponse
         public var list: @Sendable () async -> CompanionCodingAgentsDTO?
+        /// One session with its timeline. Nil = off or unknown; the route
+        /// answers 403 when `list` would, else 404.
+        public var detail: @Sendable (String) async -> CompanionCodingAgentDTO?
         /// nil = feature off (403); false = no such prompt (404).
         public var decide: @Sendable (String, CompanionCodingAgentDecisionDTO) async -> Bool?
         public var remove: @Sendable (String) async -> Bool
@@ -275,10 +279,11 @@ public final class CompanionServer: @unchecked Sendable {
         public init(hook: @escaping @Sendable (CodingAgentHookEvent) async -> CodingAgentHookResponse,
                     waitDecision: @escaping @Sendable (String, Int, TimeInterval) async -> CodingAgentHookResponse,
                     list: @escaping @Sendable () async -> CompanionCodingAgentsDTO?,
+                    detail: @escaping @Sendable (String) async -> CompanionCodingAgentDTO? = { _ in nil },
                     decide: @escaping @Sendable (String, CompanionCodingAgentDecisionDTO) async -> Bool?,
                     remove: @escaping @Sendable (String) async -> Bool) {
             self.hook = hook; self.waitDecision = waitDecision; self.list = list
-            self.decide = decide; self.remove = remove
+            self.detail = detail; self.decide = decide; self.remove = remove
         }
     }
 
@@ -1041,6 +1046,19 @@ public final class CompanionServer: @unchecked Sendable {
                     if let dto = await ops.list() {
                         self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(dto))
                     } else { self.respond(conn, "403 Forbidden", json: nil) }
+                }
+                return
+            }
+
+            // GET /coding-agents/{id} — one session and what it has been doing.
+            if method == "GET", segs.count == 2, segs[1] != "hook" {
+                let id = segs[1]
+                Task {
+                    if let dto = await ops.detail(id) {
+                        self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(dto))
+                    } else if await ops.list() == nil {
+                        self.respond(conn, "403 Forbidden", json: nil)
+                    } else { self.respond(conn, "404 Not Found", json: nil) }
                 }
                 return
             }
