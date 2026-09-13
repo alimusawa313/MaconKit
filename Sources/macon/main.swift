@@ -659,10 +659,29 @@ case "companion":
         print(n > 0 ? "Revoked \(n) device(s)." : "No device token starts with \(args[2]).")
     case "revoke-all":
         store.revokeAll(); print("Revoked all paired devices.")
+    case "activity", "audit":
+        // What paired devices did to this Mac: the app's audit log, newest first.
+        let limit = Int(option("limit") ?? "") ?? 50
+        let entries = AuditLog.shared.recent(limit: limit)
+        if flag("json") { printJSON(entries) }
+        else if entries.isEmpty {
+            print("No activity recorded yet. Lines appear when a paired device does something to this Mac.")
+        } else {
+            let f = DateFormatter(); f.dateStyle = .short; f.timeStyle = .short
+            for e in entries {
+                var line = "  \(f.string(from: e.at))  \(e.deviceName ?? e.device)  \(e.action)"
+                if let d = e.detail, !d.isEmpty { line += "  \(d)" }
+                if let v = e.via { line += "  (\(v))" }
+                print(line)
+            }
+            print("\(AuditLog.shared.count) lines in \(AuditLog.shared.fileURL.path)")
+        }
     default:
         print("""
         macon companion, manage companion-app pairings
           devices              list paired iPhones/iPads
+          activity [--limit N] [--json]
+                               what paired devices did to this Mac, newest first
           revoke <prefix>      revoke a device by token prefix
           revoke-all           revoke every device
 

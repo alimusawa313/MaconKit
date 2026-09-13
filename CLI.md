@@ -375,7 +375,16 @@ File-based, so it works even with no server running:
 macon companion devices             # list paired iPhones/iPads
 macon companion revoke <prefix>     # revoke one by token prefix (from `devices`)
 macon companion revoke-all          # revoke every device
+macon companion activity [--limit N] [--json]   # what paired devices did here, newest first
 ```
+
+Every remote power a device uses leaves a line in the activity log (pairings,
+unlocks, the curtain, screen and control sessions, terminals, files written or
+deleted, flows and agent tasks, a coding agent prompt answered from a phone, a
+build installed on a device). Reads never do. The app shows the same log under
+Settings → Access & Privacy → Activity, with export and clear; the file is
+`~/Library/Application Support/MacON/companion/audit.jsonl`, kept to the last
+couple of thousand lines.
 
 | `watch` flag | Default | Meaning |
 |---|---|---|

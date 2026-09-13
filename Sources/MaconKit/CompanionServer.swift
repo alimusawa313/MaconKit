@@ -431,6 +431,10 @@ public final class CompanionServer: @unchecked Sendable {
     private let clipboardOps: ClipboardOps?
     /// Coding agents (nil disables the /coding-agents routes).
     private let codingAgentOps: CodingAgentOps?
+    /// Every request that changes something on this Mac, or opens a live
+    /// session into it, is reported here with the caller's token and how it
+    /// came in ("lan" | "tunnel"). Nil = no audit.
+    private let onAudit: (@Sendable (_ token: String, _ action: String, _ detail: String?, _ via: String) -> Void)?
     /// The live /mic connection, so a new source can evict it (last wins).
     private let micLock = NSLock()
     private var micConn: NWConnection?
@@ -483,6 +487,7 @@ public final class CompanionServer: @unchecked Sendable {
                 setAudioOutput: (@Sendable (String) async -> Bool)? = nil,
                 clipboardOps: ClipboardOps? = nil,
                 codingAgentOps: CodingAgentOps? = nil,
+                onAudit: (@Sendable (_ token: String, _ action: String, _ detail: String?, _ via: String) -> Void)? = nil,
                 onLog: @escaping @Sendable (String) -> Void,
                 onListening: @escaping @Sendable (Bool) -> Void = { _ in }) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8899
@@ -530,6 +535,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.setAudioOutput = setAudioOutput
         self.clipboardOps = clipboardOps
         self.codingAgentOps = codingAgentOps
+        self.onAudit = onAudit
         self.onLog = onLog
         self.onListening = onListening
     }
@@ -639,7 +645,7 @@ public final class CompanionServer: @unchecked Sendable {
 
         do {
             let l = loopbackOnly ? try NWListener(using: params) : try NWListener(using: params, on: port)
-            l.newConnectionHandler = { [weak self] conn in self?.accept(conn) }
+            l.newConnectionHandler = { [weak self] conn in self?.accept(conn, viaTunnel: loopbackOnly) }
             l.stateUpdateHandler = { [weak self] state in
                 guard let self else { return }
                 switch state {
@@ -731,11 +737,14 @@ public final class CompanionServer: @unchecked Sendable {
         /// idle for as long as it likes.
         var routed = false
         let started = Date()
+        /// Came in on the loopback listener, i.e. through cloudflared.
+        var viaTunnel = false
     }
 
-    private func accept(_ conn: NWConnection) {
+    private func accept(_ conn: NWConnection, viaTunnel: Bool) {
         conn.start(queue: queue)
         let incoming = Incoming()
+        incoming.viaTunnel = viaTunnel
         watchProgress(conn, incoming)
         readRequest(conn, incoming)
     }
@@ -791,7 +800,7 @@ public final class CompanionServer: @unchecked Sendable {
             }
             incoming.routed = true
             let body = incoming.buffer.subdata(in: sep.upperBound..<incoming.buffer.endIndex)
-            self.route(conn, header: header, body: body)
+            self.route(conn, header: header, body: body, via: incoming.viaTunnel ? "tunnel" : "lan")
         }
     }
 
@@ -807,7 +816,7 @@ public final class CompanionServer: @unchecked Sendable {
         return nil
     }
 
-    private func route(_ conn: NWConnection, header: String, body: Data) {
+    private func route(_ conn: NWConnection, header: String, body: Data, via: String) {
         let requestLine = header.split(separator: "\r\n").first.map(String.init) ?? ""
         let parts = requestLine.split(separator: " ")
         let method = parts.first.map { $0.uppercased() } ?? ""
@@ -837,6 +846,7 @@ public final class CompanionServer: @unchecked Sendable {
                 // from this moment on. Pairing itself has either come through the
                 // tunnel, or over this very TLS connection on first sight.
                 resp.lanCertSha256 = self.lanCertPin
+                self.onAudit?(resp.token, "paired", req.deviceName, via)
                 self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(resp))
             }
             return
@@ -845,6 +855,16 @@ public final class CompanionServer: @unchecked Sendable {
         // Everything else needs a valid bearer token.
         guard let token = bearer(header), authorize(token) else {
             respond(conn, "401 Unauthorized", json: nil); return
+        }
+
+        // The audit line, decided in one place from the request's shape so no
+        // route can forget it. Reads and a device's own housekeeping are not
+        // in the list.
+        if let onAudit {
+            let isUpgrade = headerValue(header, "upgrade")?.lowercased() == "websocket"
+            if let hit = AuditLog.action(method: method, path: rawPath, segs: segs, isUpgrade: isUpgrade, body: body) {
+                onAudit(token, hit.action, hit.detail, via)
+            }
         }
 
         // POST /unpair — the calling device ends its own pairing. Its token is

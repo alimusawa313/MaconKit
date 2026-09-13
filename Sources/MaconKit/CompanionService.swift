@@ -52,6 +52,7 @@ public final class CompanionService {
                 setAudioOutput: (@Sendable (String) async -> Bool)? = nil,
                 clipboardOps: CompanionServer.ClipboardOps? = nil,
                 codingAgentOps: CompanionServer.CodingAgentOps? = nil,
+                onAudit: (@Sendable (_ token: String, _ action: String, _ detail: String?, _ via: String) -> Void)? = nil,
                 onAuthorize: (@Sendable (String) -> Void)? = nil,
                 onDeviceUnpaired: (@Sendable (String) -> Void)? = nil,
                 onLog: @escaping @Sendable (String) -> Void,
@@ -138,6 +139,7 @@ public final class CompanionService {
             setAudioOutput: setAudioOutput,
             clipboardOps: clipboardOps,
             codingAgentOps: codingAgentOps,
+            onAudit: onAudit,
             onLog: onLog,
             onListening: onListening)
     }
