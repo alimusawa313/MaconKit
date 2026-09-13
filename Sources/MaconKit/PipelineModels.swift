@@ -150,6 +150,35 @@ public struct MaconStep: Codable {
     /// Each run gets `MACON_MATRIX_<KEY>` in its env. All combinations run; the
     /// step fails if any of them fails.
     public var matrix: [String: [String]]?
+    /// After the script succeeds, put the app it built on a real device.
+    /// `install: build/**/*.app` is the short form; the long form names a device.
+    public var install: MaconInstall?
+}
+
+/// The step's product and where it goes. Short form in YAML is just the
+/// path (or glob) of the .app; the long form adds `device` and `launch`.
+public struct MaconInstall: Codable {
+    /// Path or glob of the .app, relative to the checkout. Newest match wins.
+    public var app: String
+    /// devicectl device: identifier, UDID or the device's name. Nil = the
+    /// `MACON_INSTALL_DEVICE` env var, else the one connected phone or tablet.
+    public var device: String?
+    /// Open it after installing (default true).
+    public var launch: Bool?
+
+    public init(app: String, device: String? = nil, launch: Bool? = nil) {
+        self.app = app; self.device = device; self.launch = launch
+    }
+
+    public init(from decoder: Decoder) throws {
+        if let single = try? decoder.singleValueContainer(), let path = try? single.decode(String.self) {
+            app = path; device = nil; launch = nil; return
+        }
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        app = try c.decode(String.self, forKey: .app)
+        device = try c.decodeIfPresent(String.self, forKey: .device)
+        launch = try c.decodeIfPresent(Bool.self, forKey: .launch)
+    }
 }
 
 public struct MaconTrigger: Codable {
@@ -185,6 +214,9 @@ public struct RunSummary: Identifiable, Codable, Equatable {
     public var startedAt: Date
     public var finishedAt: Date
     public var result: RunResult
+    /// Apps the run built and installed (or could install) on a device.
+    /// Absent in runs saved before this existed.
+    public var products: [RunProduct]?
 
     public var shaShort: String { String(shaFull.prefix(8)) }
     public var duration: TimeInterval { max(0, finishedAt.timeIntervalSince(startedAt)) }

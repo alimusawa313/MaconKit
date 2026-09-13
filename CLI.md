@@ -17,6 +17,7 @@ macon init          # verify the toolchain first
 macon version                     print the installed version
 macon doctor | init [--check]     check toolchain, permissions, cloudflared, disk (--json)
 macon sims <list|install|create>  list / install simulator runtimes (all Apple platforms)
+macon devices [--json]            real iPhones/iPads paired with Xcode, for `install:` steps
 macon lint [path]                 parse & summarize a macon.yml
 macon validate [path]             validate a macon.yml or a macon-export.json
 macon config <init|validate>      scaffold / check the portable config
@@ -114,6 +115,41 @@ workflows:
 (Combinations run sequentially, so simulators don't contend. If you'd rather one
 `xcodebuild` invocation parallelize them, pass multiple `-destination` flags in
 your fastlane lane instead.)
+
+---
+
+### Install on your phone
+
+A step can end with the app it built on a real iPhone or iPad, no TestFlight
+round trip. Add `install:` next to the `script:`; after the script exits 0 the
+runner finds the `.app`, installs it with Xcode's `devicectl`, and launches it.
+
+```yaml
+  phone:
+    steps:
+      - name: Build for my iPhone
+        script: >
+          xcodebuild -scheme App -configuration Debug
+          -destination 'generic/platform=iOS' -derivedDataPath build build
+        install: build/Build/Products/Debug-iphoneos/*.app        # short form
+      - name: Same, but explicit
+        script: …
+        install:
+          app: build/Build/Products/Debug-iphoneos/*.app
+          device: "Ali’s iPhone"      # devicectl name, identifier or UDID
+          launch: true                # default
+```
+
+`app` is a path or glob relative to the checkout; the newest match wins. With
+no `device`, the runner uses `MACON_INSTALL_DEVICE` from the environment (a
+secret or a shell variable), else the one phone or tablet connected right now.
+`macon devices` lists what Xcode has paired. The step fails if the install
+does. What it needs is what Xcode's Run button needs: the device paired and
+trusted once, Developer Mode on, and a development signature that lists it.
+
+Every app a run installed (or tried to) is remembered with the run, so the
+companion's build page has an **Install** button that puts it on that phone,
+or any other paired one, again.
 
 ---
 

@@ -12,6 +12,8 @@
 //    GET  /builds/{id}          (Bearer)   one build
 //    POST /builds/{id}/rerun    (Bearer)   trigger a fresh run of its pipeline
 //    POST /builds/{id}/cancel   (Bearer)   stop it if it's building
+//    POST /builds/{id}/install  (Bearer)   put the app it built on a device {device}
+//    GET  /hardware             (Bearer)   iPhones/iPads paired with this Mac's Xcode
 //    WS   /builds/{id}/logs     (Bearer)   live log tail
 //    GET  /builds/{id}/logs?after=N (Bearer)  log lines as JSON (for the CLI)
 //    GET  /metrics              (Bearer)   Prometheus text exposition
@@ -325,6 +327,11 @@ public final class CompanionServer: @unchecked Sendable {
     private let build: Build
     private let logsSince: LogsSince
     private let buildAction: BuildActionFn?
+    /// Install a finished build's app on a device (nil = 404). A nil result
+    /// means no such build or nothing to install.
+    private let installBuild: (@Sendable (_ id: String, _ device: String) async -> CompanionInstallResultDTO?)?
+    /// The devices Xcode has paired (nil = 404).
+    private let hardware: (@Sendable () async -> CompanionHardwareDTO)?
     private let pipelineOps: PipelineOps?
     /// Prometheus text for GET /metrics (nil disables the route).
     private let metrics: (@Sendable () async -> String)?
@@ -439,6 +446,8 @@ public final class CompanionServer: @unchecked Sendable {
                 build: @escaping Build,
                 logsSince: @escaping LogsSince,
                 buildAction: BuildActionFn? = nil,
+                installBuild: (@Sendable (_ id: String, _ device: String) async -> CompanionInstallResultDTO?)? = nil,
+                hardware: (@Sendable () async -> CompanionHardwareDTO)? = nil,
                 pipelineOps: PipelineOps? = nil,
                 metrics: (@Sendable () async -> String)? = nil,
                 screen: ScreenBroadcaster? = nil,
@@ -484,6 +493,8 @@ public final class CompanionServer: @unchecked Sendable {
         self.build = build
         self.logsSince = logsSince
         self.buildAction = buildAction
+        self.installBuild = installBuild
+        self.hardware = hardware
         self.pipelineOps = pipelineOps
         self.metrics = metrics
         self.screen = screen
@@ -1582,6 +1593,30 @@ public final class CompanionServer: @unchecked Sendable {
                 guard let b = await self.build(segs[1]) else { self.respond(conn, "404 Not Found", json: nil); return }
                 self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(b))
             }
+            return
+        }
+
+        // POST /builds/{id}/install {"device": …} — the app this run built,
+        // onto a real device. Long: devicectl can take a minute over Wi-Fi.
+        if method == "POST", segs.count == 3, segs[0] == "builds", segs[2] == "install" {
+            guard let installBuild else { respond(conn, "404 Not Found", json: nil); return }
+            struct Body: Decodable { var device: String }
+            guard let b = try? CompanionJSON.decoder.decode(Body.self, from: body) else {
+                respond(conn, "400 Bad Request", json: nil); return
+            }
+            let id = segs[1]
+            Task {
+                if let result = await installBuild(id, b.device) {
+                    self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(result))
+                } else { self.respond(conn, "404 Not Found", json: nil) }
+            }
+            return
+        }
+
+        // GET /hardware — iPhones, iPads and the rest Xcode has paired.
+        if method == "GET", path == "/hardware" {
+            guard let hardware else { respond(conn, "404 Not Found", json: nil); return }
+            Task { self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(await hardware())) }
             return
         }
 

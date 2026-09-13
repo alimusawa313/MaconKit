@@ -99,6 +99,10 @@ public final class CompanionService {
                 guard let act = CompanionData.BuildAction(rawValue: action) else { return false }
                 return await data.perform(act, buildID: id)
             },
+            // The app a run built, onto a phone: same trust as re-running the
+            // build, and the same list of devices Xcode's Run button offers.
+            installBuild: { id, device in await data.install(buildID: id, device: device) },
+            hardware: { CompanionHardwareDTO(devices: await DeviceInstaller.list()) },
             pipelineOps: ops,
             metrics: { await data.metricsText() },
             screen: screen,

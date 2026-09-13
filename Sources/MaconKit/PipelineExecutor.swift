@@ -25,6 +25,9 @@ public enum PipelineExecutor {
         public var shouldCancel: @Sendable () -> Bool
         /// Receives each spawned step process (for cancellation).
         public var onProcess: @Sendable (Process) -> Void
+        /// Receives each app a step built and installed (an `install:` step),
+        /// so the run can remember it.
+        public var onProduct: @Sendable (RunProduct) -> Void
 
         public init(workingDirectory: String,
                     workflowName: String? = nil,
@@ -32,7 +35,8 @@ public enum PipelineExecutor {
                     pullRequestDestBranch: String? = nil,
                     env: [String: String] = [:],
                     shouldCancel: @escaping @Sendable () -> Bool = { false },
-                    onProcess: @escaping @Sendable (Process) -> Void = { _ in }) {
+                    onProcess: @escaping @Sendable (Process) -> Void = { _ in },
+                    onProduct: @escaping @Sendable (RunProduct) -> Void = { _ in }) {
             self.workingDirectory = workingDirectory
             self.workflowName = workflowName
             self.branch = branch
@@ -40,6 +44,7 @@ public enum PipelineExecutor {
             self.env = env
             self.shouldCancel = shouldCancel
             self.onProcess = onProcess
+            self.onProduct = onProduct
         }
     }
 
@@ -112,9 +117,41 @@ public enum PipelineExecutor {
                     if stepCode == 0 { stepCode = code }
                 }
             }
+            // The script built something for a real device: put it there.
+            if !stepFailed, let install = r.step.install, !options.shouldCancel() {
+                let code = await performInstall(install, env: env, options: options, onLine: onLine)
+                if code != 0 { stepFailed = true; stepCode = code }
+            }
             if stepFailed && !failed { failed = true; firstFailCode = stepCode }
         }
         return failed ? firstFailCode : 0
+    }
+
+    /// An `install:` after a step: find the .app, pick the device, install
+    /// and launch. Records the product whether or not the install worked, so
+    /// the build's page can offer it again.
+    static func performInstall(_ install: MaconInstall, env: [String: String], options: Options,
+                               onLine: @escaping @Sendable (String) -> Void) async -> Int32 {
+        guard let app = DeviceInstaller.resolveApp(install.app, cwd: options.workingDirectory) else {
+            onLine("✗ install: nothing matches “\(install.app)” (looked under \(options.workingDirectory)).")
+            return 1
+        }
+        guard var product = DeviceInstaller.product(at: app) else {
+            onLine("✗ install: \(app) has no readable Info.plist.")
+            return 1
+        }
+        var chosen = install.device
+        if chosen == nil { chosen = await DeviceInstaller.defaultDevice(env: env) }
+        guard let device = chosen else {
+            options.onProduct(product)
+            onLine("✗ install: no device. Name one in the step (`device:`), set MACON_INSTALL_DEVICE, or plug a phone in.")
+            return 1
+        }
+        let code = await DeviceInstaller.install(app: app, device: device, launch: install.launch ?? true,
+                                                 onLine: onLine)
+        if code == 0 { product.installedOn = device }
+        options.onProduct(product)
+        return code
     }
 
     /// Cartesian product of a matrix (sorted keys for deterministic order).

@@ -55,6 +55,8 @@ public final class PipelineRunner: ObservableObject, Identifiable {
     private var capturing = false
     private var buildLines: [LogLine] = []
     private var runStartedAt: Date?
+    /// Apps the running build installed (or tried to) on a device.
+    private var runProducts: [RunProduct] = []
 
     public init(config: PipelineConfig) {
         self.config = config
@@ -283,6 +285,7 @@ public final class PipelineRunner: ObservableObject, Identifiable {
         buildState = .running(sha: sha)
         runStartedAt = Date()
         buildLines = []
+        runProducts = []
         capturing = true          // appendLine now also records into this run
         if let pr {
             appendLine("──────── PR #\(pr.id): \(pr.title) @ \(sha.prefix(8)) ────────")
@@ -324,7 +327,10 @@ public final class PipelineRunner: ObservableObject, Identifiable {
                     pullRequestDestBranch: pr?.destBranch,
                     env: externalEnv(sha: sha),
                     shouldCancel: { ctrl.cancelled },
-                    onProcess: { ctrl.currentProcess = $0 })
+                    onProcess: { ctrl.currentProcess = $0 },
+                    onProduct: { [weak self] product in
+                        Task { @MainActor in self?.runProducts.append(product) }
+                    })
                 code = await PipelineExecutor.run(pipeline, options: options,
                                                   onLine: { [weak self] line in
                     Task { @MainActor in self?.appendLine(line) }
@@ -362,7 +368,9 @@ public final class PipelineRunner: ObservableObject, Identifiable {
         capturing = false
         let summary = RunSummary(id: UUID(), shaFull: sha,
                                  startedAt: runStartedAt ?? Date(), finishedAt: Date(),
-                                 result: result)
+                                 result: result,
+                                 products: runProducts.isEmpty ? nil : runProducts)
+        runProducts = []
         let run = PipelineRun(summary: summary, lines: buildLines)
         let pid = config.id
         let updated = await Task.detached { RunStore.save(run, pipelineID: pid) }.value

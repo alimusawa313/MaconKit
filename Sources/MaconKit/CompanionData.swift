@@ -52,7 +52,7 @@ public final class CompanionData {
                     id: "\(pid)~\(s.id.uuidString)", repo: repo, branch: r.config.branch,
                     commit: s.shaShort, message: nil, status: CompanionJSON.status(s.result),
                     startedAt: s.startedAt, finishedAt: s.finishedAt,
-                    currentStep: nil, steps: nil))
+                    currentStep: nil, steps: nil, products: s.products))
             }
         }
         return CompanionBuildsDTO(runnerName: runnerName, builds: out)
@@ -79,6 +79,30 @@ public final class CompanionData {
             runner.runNow()
         }
         return true
+    }
+
+    /// Put the app a finished run built onto a device (again, or for the
+    /// first time if the run's own install failed). Nil = no such run, or
+    /// nothing to install. The lines devicectl printed come back with the
+    /// verdict so the device can show why an install failed.
+    public func install(buildID: String, device: String) async -> CompanionInstallResultDTO? {
+        guard let (runner, part) = resolve(buildID), let rid = UUID(uuidString: part),
+              let summary = runner.history.first(where: { $0.id == rid }),
+              let products = summary.products, !products.isEmpty else { return nil }
+        let target = device.trimmingCharacters(in: .whitespaces)
+        guard !target.isEmpty else { return CompanionInstallResultDTO(ok: false, log: ["No device named."]) }
+        let sink = LineSink()
+        var ok = true
+        for product in products {
+            guard FileManager.default.fileExists(atPath: product.path) else {
+                sink.add("✗ \(product.name) is gone from disk (\(product.path)). Run the build again.")
+                ok = false; continue
+            }
+            let code = await DeviceInstaller.install(app: product.path, device: target, launch: true,
+                                                     onLine: { sink.add($0) })
+            if code != 0 { ok = false }
+        }
+        return CompanionInstallResultDTO(ok: ok, log: sink.lines)
     }
 
     /// Log lines for a build with `seq > afterSeq`, oldest first.
@@ -286,4 +310,13 @@ public final class CompanionData {
         }
         return nil
     }
+}
+
+
+/// Collects lines from a background `onLine` for a one-shot reply.
+final class LineSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [String] = []
+    func add(_ line: String) { lock.lock(); stored.append(line); lock.unlock() }
+    var lines: [String] { lock.lock(); defer { lock.unlock() }; return stored }
 }

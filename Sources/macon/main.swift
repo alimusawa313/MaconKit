@@ -906,6 +906,24 @@ case "validate":
         exit(0)
     }
 
+case "devices":
+    // macon devices — the iPhones/iPads Xcode has paired with this Mac, as
+    // `install:` steps and MACON_INSTALL_DEVICE can name them.
+    let devices = await DeviceInstaller.list()
+    if flag("json") { printJSON(devices) }
+    else if devices.isEmpty {
+        print("No devices. Pair a phone with Xcode once (plug it in, trust it in Xcode → Devices) and it shows up here.")
+    } else {
+        for d in devices {
+            let state = d.connected ? "connected" : "not reachable"
+            let dev = d.developerMode ? "" : "  ·  Developer Mode off"
+            print("  • \(d.name)  ·  \(d.model)  ·  \(d.platform) \(d.osVersion)  ·  \(state)\(dev)")
+            print("      id \(d.id)")
+        }
+        print("Name one in macon.yml (`install: { app: build/**/*.app, device: \"Ali’s iPhone\" }`) or set MACON_INSTALL_DEVICE.")
+    }
+    exit(0)
+
 case "hook":
     // macon hook — the coding-agent hook (Claude Code, Codex) and its installer.
     // Reports the agent's moments to the running app so a paired device gets a
@@ -948,6 +966,7 @@ case "help", "--help", "-h":
                                    (init also installs the Homebrew-able ones)
       sims <list|install [platform] [version]|create "<device>" <version> [platform]>
                                    list / install simulator runtimes (iOS, watchOS, tvOS, visionOS)
+      devices [--json]             real iPhones/iPads paired with Xcode (for `install:` steps)
       lint [path]                  parse and summarize a macon.yml
       validate [path]              validate a macon.yml or a macon-export.json
       config <init [path]|validate [path] [--json]>

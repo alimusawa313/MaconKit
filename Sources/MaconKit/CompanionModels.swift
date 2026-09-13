@@ -27,6 +27,22 @@ public struct CompanionBuildDTO: Codable, Sendable {
     public var finishedAt: Date?
     public var currentStep: String?
     public var steps: [CompanionStepDTO]?
+    /// Apps the run built for a real device (an `install:` step). Absent on
+    /// a live build and on runs without one.
+    public var products: [RunProduct]?
+}
+
+/// `POST /builds/{id}/install` → whether devicectl succeeded, and what it said.
+public struct CompanionInstallResultDTO: Codable, Sendable {
+    public var ok: Bool
+    public var log: [String]
+    public init(ok: Bool, log: [String]) { self.ok = ok; self.log = log }
+}
+
+/// `GET /hardware` → the devices paired with this Mac's Xcode.
+public struct CompanionHardwareDTO: Codable, Sendable {
+    public var devices: [HardwareDevice]
+    public init(devices: [HardwareDevice]) { self.devices = devices }
 }
 
 public struct CompanionStepDTO: Codable, Sendable {
