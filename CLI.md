@@ -420,9 +420,13 @@ macon hook status
 macon hook uninstall
 ```
 
-Then, in the MacOn app: **Settings → Devices → Let paired devices answer coding
-agent prompts**. The same pane has Hook up / Remove buttons that do what the
-commands above do.
+You do not need any of this if you use the MacOn app: the app carries its own
+`macon` inside the bundle, and **Settings → Devices → Let paired devices answer
+coding agent prompts** installs the hooks, points them at that copy, repairs
+them if the app moves, and removes them when switched off. The commands above
+are for a Mac that runs the headless CLI only, or for looking under the hood:
+`macon hook status` also prints the last lines of `~/Library/Logs/macon/hook.log`,
+where every hook run says whether it reached the app.
 
 What gets written:
 

@@ -27,8 +27,12 @@ import MaconKit
     let sub = args.count > 1 ? args[1].lowercased() : "status"
     switch sub {
     case "claude":
+        // Inside an agent there is no one to answer a Keychain prompt, so the
+        // token lives in a file next to the pairings for this path.
+        Remote.tokenFromFileOnly = true
         await claudeHook()
     case "codex":
+        Remote.tokenFromFileOnly = true
         await codexHook()
     case "install", "uninstall":
         let which = args.count > 2 && !args[2].hasPrefix("--") ? args[2].lowercased() : "all"
@@ -72,6 +76,14 @@ import MaconKit
     case "status":
         print("Claude Code: \(CodingAgentHooks.claudeInstalled() ? "hooked" : "not hooked")  (\(CodingAgentHooks.claudeSettingsURL.path))")
         print("Codex:       \(CodingAgentHooks.codexInstalled() ? "hooked" : "not hooked")  (\(CodingAgentHooks.codexConfigURL.path))")
+        for c in Set(CodingAgentHooks.claudeCommands()) { print("  runs: \(c)") }
+        let recent = CodingAgentHooks.recentLog()
+        if recent.isEmpty {
+            print("No hook has run yet. Start Claude Code in a project after hooking up.")
+        } else {
+            print("Last hook runs (\(CodingAgentHooks.logURL.path)):")
+            for line in recent { print("  \(line)") }
+        }
         if CodingAgentHooks.executable() == nil {
             print("The macon CLI is not on PATH; install it with Homebrew before installing hooks.")
         }
@@ -122,6 +134,7 @@ import MaconKit
     }
 
     guard let reply = await post(event) else { return }
+    CodingAgentHooks.log("claude \(name) \(session.prefix(8)) -> ok seq=\(reply.seq.map(String.init) ?? "-") hold=\(reply.hold)")
 
     // A permission the Mac wants held for the phone: poll for the answer.
     guard event.kind == .permission, reply.hold, let seq = reply.seq else { return }
@@ -240,15 +253,29 @@ private func lastAssistantText(transcript path: String) -> String? {
     default:
         return
     }
-    _ = await post(event)
+    if await post(event) != nil { CodingAgentHooks.log("codex turn -> ok") }
 }
 
 // MARK: - Transport
 
-/// POST the moment; nil when the app is not there (which is fine).
+/// POST the moment; nil when the app is not there (which is fine, and is
+/// written to the hook log so it can be seen).
 private func post(_ event: CodingAgentHookEvent) async -> CodingAgentHookResponse? {
-    guard let body = try? CompanionJSON.encoder.encode(event),
-          let (code, data) = try? await Remote.request("coding-agents/hook", method: "POST", body: body),
-          code == 200 else { return nil }
-    return try? CompanionJSON.decoder.decode(CodingAgentHookResponse.self, from: data)
+    guard let body = try? CompanionJSON.encoder.encode(event) else { return nil }
+    do {
+        var (code, data) = try await Remote.request("coding-agents/hook", method: "POST", body: body)
+        // No LAN listener (a Mac with no LAN certificate serves the tunnel
+        // only): the cleartext loopback port right next to it still answers.
+        if code == 0, Remote.isLocalHost, Remote.loopbackFallback() {
+            (code, data) = try await Remote.request("coding-agents/hook", method: "POST", body: body)
+        }
+        guard code == 200 else {
+            CodingAgentHooks.log("\(event.tool) \(event.kind.rawValue) -> HTTP \(code) from \(Remote.host) (\(code == 404 ? "the Mac app is older than this feature" : Remote.httpHint(code)))")
+            return nil
+        }
+        return try? CompanionJSON.decoder.decode(CodingAgentHookResponse.self, from: data)
+    } catch {
+        CodingAgentHooks.log("\(event.tool) \(event.kind.rawValue) -> not delivered: \(String(describing: error).split(separator: "\n").first ?? "")")
+        return nil
+    }
 }

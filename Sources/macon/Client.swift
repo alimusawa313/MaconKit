@@ -48,6 +48,19 @@ enum Remote {
         return true
     }
 
+    /// Switch this process to the cleartext loopback listener (port + 1,
+    /// 127.0.0.1 only, what cloudflared talks to) for the rest of its run.
+    /// For a hook on the same Mac when the TLS port is not being served.
+    /// Returns false when already switched.
+    nonisolated(unsafe) private static var onLoopback = false
+    static func loopbackFallback() -> Bool {
+        guard !onLoopback else { return false }
+        onLoopback = true
+        let port = UInt16(host.split(separator: ":").last.map(String.init) ?? "") ?? 8899
+        args += ["--host", "http://127.0.0.1:\(CompanionServer.loopbackPort(for: port))"]
+        return true
+    }
+
     static var isLocalHost: Bool {
         let bare = host.split(separator: ":").first.map(String.init) ?? host
         return bare == "localhost" || bare == "127.0.0.1"
@@ -135,12 +148,42 @@ enum Remote {
 
     private static let tokenAccount = "cli.companion.token"
 
+    /// A hook runs inside an agent with nobody there to answer a Keychain
+    /// prompt, so it keeps its token in a file beside the pairings instead
+    /// (same owner, same folder, 0600). Set by `macon hook`.
+    nonisolated(unsafe) static var tokenFromFileOnly = false
+
+    private static var tokenFileURL: URL {
+        let base = (try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                                 appropriateFor: nil, create: true))
+            ?? FileManager.default.temporaryDirectory
+        return base.appendingPathComponent("MacON/companion/cli-token")
+    }
+
+    private static func readTokenFile() -> String {
+        (try? String(contentsOf: tokenFileURL, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private static func writeTokenFile(_ token: String) {
+        let url = tokenFileURL
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? token.write(to: url, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
     /// Resolve a bearer token: --token / MACON_TOKEN / stored / self-pair (local).
     static func token() -> String {
         if let t = option("token") { return t }
         if let t = env["MACON_TOKEN"], !t.isEmpty { return t }
+        if tokenFromFileOnly {
+            let file = readTokenFile()
+            if !file.isEmpty { return file }
+            return selfPair() ?? ""
+        }
         let stored = Keychain.get(account: tokenAccount)
         if !stored.isEmpty { return stored }
+        let file = readTokenFile()
+        if !file.isEmpty { return file }
         return selfPair() ?? ""
     }
 
@@ -150,9 +193,13 @@ enum Remote {
         guard isLocalHost else { return nil }
         let store = PairingStore()
         let code = store.mintCode(ttl: 60)
-        guard let token = store.pair(code: code, device: "macon CLI") else { return nil }
-        Keychain.set(token, account: tokenAccount)
-        FileHandle.standardError.write(Data("· paired this CLI with the local runner (token stored in Keychain)\n".utf8))
+        let name = tokenFromFileOnly ? "MacOn hooks" : "macon CLI"
+        guard let token = store.pair(code: code, device: name) else { return nil }
+        writeTokenFile(token)
+        if !tokenFromFileOnly {
+            Keychain.set(token, account: tokenAccount)
+            FileHandle.standardError.write(Data("· paired this CLI with the local runner (token stored in Keychain)\n".utf8))
+        }
         return token
     }
 
@@ -194,7 +241,8 @@ enum Remote {
 
         // Stale local token (server re-paired / store reset) → re-pair once.
         if code == 401, authed, isLocalHost, option("token") == nil, env["MACON_TOKEN"] == nil {
-            Keychain.set("", account: tokenAccount)
+            if !tokenFromFileOnly { Keychain.set("", account: tokenAccount) }
+            try? FileManager.default.removeItem(at: tokenFileURL)
             guard let fresh = selfPair() else { return (code, data) }
             var retry = req
             retry.setValue("Bearer \(fresh)", forHTTPHeaderField: "Authorization")

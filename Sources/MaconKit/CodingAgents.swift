@@ -391,16 +391,93 @@ public enum CodingAgentHooks {
         case claude, codex
     }
 
-    /// The `macon` executable the hooks run: Homebrew's when it is there, else
-    /// the one running now, else nil (nothing to point a hook at).
+    /// The `macon` executable the hooks run. The app carries one inside its
+    /// bundle, so nobody has to install anything; that copy wins whenever the
+    /// caller is the app. A CLI on PATH is next (Homebrew), then whatever is
+    /// running now. Nil = nothing to point a hook at.
     public static func executable() -> String? {
-        let candidates = ["/opt/homebrew/bin/macon", "/usr/local/bin/macon"]
-        if let found = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
-            return found
-        }
+        let fm = FileManager.default
+        // Contents/Helpers, not Contents/MacOS: the app's own executable is
+        // "MacON", and on a case-insensitive disk that is the same name.
+        let bundled = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/macon").path
+        if fm.isExecutableFile(atPath: bundled) { return bundled }
         let own = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().path
-        if own.hasSuffix("/macon"), FileManager.default.isExecutableFile(atPath: own) { return own }
+        if own.hasSuffix("/macon"), fm.isExecutableFile(atPath: own) { return own }
+        for candidate in ["/opt/homebrew/bin/macon", "/usr/local/bin/macon"]
+        where fm.isExecutableFile(atPath: candidate) { return candidate }
         return nil
+    }
+
+    /// Whether Codex is set up on this Mac at all; a fresh config.toml for a
+    /// tool the person never installed would only puzzle them.
+    public static var codexPresent: Bool {
+        FileManager.default.fileExists(atPath: codexConfigURL.deletingLastPathComponent().path)
+    }
+
+    /// Point installed hooks at `exe` if they name anything else: the app
+    /// moved (DerivedData to /Applications), or an older install used the
+    /// Homebrew path. Returns which agents were rewritten.
+    @discardableResult
+    public static func repair(exe: String, port: Int?) -> [Agent] {
+        var fixed: [Agent] = []
+        if claudeInstalled(), !claudeCommands().allSatisfy({ $0.hasPrefix(exe + " ") || $0 == exe }) {
+            if (try? installClaude(exe: exe, port: port)) != nil { fixed.append(.claude) }
+        }
+        if codexInstalled(), let text = try? String(contentsOf: codexConfigURL, encoding: .utf8),
+           !text.contains("\"\(exe)\"") {
+            if (try? installCodex(exe: exe, port: port)) != nil { fixed.append(.codex) }
+        }
+        return fixed
+    }
+
+    /// The commands our Claude entries run, for the repair check.
+    public static func claudeCommands() -> [String] {
+        guard let root = readJSON(claudeSettingsURL),
+              let hooks = root["hooks"] as? [String: Any] else { return [] }
+        var out: [String] = []
+        for entry in hooks.values {
+            for e in (entry as? [[String: Any]]) ?? [] where isOurs(e) {
+                for inner in e["hooks"] as? [[String: Any]] ?? [] {
+                    if let c = inner["command"] as? String { out.append(c) }
+                }
+            }
+        }
+        return out
+    }
+
+    // MARK: The hook's own log
+
+    /// One line per hook run, so "why does nothing show up" has an answer
+    /// without a debugger: what came in, and whether it reached the app.
+    public static var logURL: URL {
+        home.appendingPathComponent("Library/Logs/macon/hook.log")
+    }
+
+    public static func log(_ line: String) {
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        let text = "\(stamp)  \(line)\n"
+        let url = logURL
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let h = try? FileHandle(forWritingTo: url) {
+            defer { try? h.close() }
+            _ = try? h.seekToEnd()
+            try? h.write(contentsOf: Data(text.utf8))
+        } else {
+            try? text.write(to: url, atomically: true, encoding: .utf8)
+        }
+        // Keep it small: past ~4000 lines, drop the oldest half.
+        if let all = try? String(contentsOf: url, encoding: .utf8) {
+            let lines = all.split(separator: "\n", omittingEmptySubsequences: true)
+            if lines.count > 4000 {
+                try? (lines.suffix(2000).joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
+            }
+        }
+    }
+
+    /// The newest lines, oldest first.
+    public static func recentLog(_ count: Int = 5) -> [String] {
+        guard let all = try? String(contentsOf: logURL, encoding: .utf8) else { return [] }
+        return all.split(separator: "\n", omittingEmptySubsequences: true).suffix(count).map(String.init)
     }
 
     /// `macon hook <agent> [--port N]` as argv. The subcommand comes right
