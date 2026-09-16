@@ -407,6 +407,9 @@ public final class CompanionServer: @unchecked Sendable {
     /// Push: a device hands the Mac its APNs token so build alerts reach it.
     /// The bearer token identifies which paired device; body is opaque.
     private let apnsRegister: (@Sendable (_ bearer: String, _ body: Data) async -> Bool)?
+    /// The free tier's daily remote allowance. Owned here rather than injected:
+    /// it has no app-side dependency, and a headless runner keeps one too.
+    private let remoteMeter = RemoteMeterLedger()
     /// Open a web address in the Mac's default browser (the share sheet and
     /// Shortcuts). Answers false when remote control is off.
     private let openURL: (@Sendable (_ url: String) async -> Bool)?
@@ -1182,6 +1185,27 @@ public final class CompanionServer: @unchecked Sendable {
             Task {
                 let ok = await openURL(b.url)
                 self.respond(conn, ok ? "200 OK" : "403 Forbidden", json: nil)
+            }
+            return
+        }
+
+        // GET/POST /pro/meter — the free tier's 40 minutes a day of remote
+        // time, kept on this Mac so every paired device shares one count and
+        // the day rolls over at this Mac's midnight. GET reads it; POST adds
+        // {"seconds": n} and reads it back. Pro companions never call it.
+        if segs.count == 2, segs[0] == "pro", segs[1] == "meter", method == "GET" || method == "POST" {
+            var add = 0
+            if method == "POST" {
+                struct Report: Decodable { var seconds: Int }
+                guard let report = try? CompanionJSON.decoder.decode(Report.self, from: body) else {
+                    respond(conn, "400 Bad Request", json: nil); return
+                }
+                add = report.seconds
+            }
+            let ledger = remoteMeter
+            Task {
+                let info = add > 0 ? await ledger.add(seconds: add) : await ledger.info()
+                self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(info))
             }
             return
         }
