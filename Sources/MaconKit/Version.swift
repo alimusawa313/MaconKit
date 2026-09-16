@@ -2,4 +2,4 @@ import Foundation
 
 // Stamped by the Homebrew formula at build time (inreplace) to match the release
 // tag. The literal here is the dev/fallback value.
-public let maconVersion = "1.9.3"
+public let maconVersion = "1.9.4"
