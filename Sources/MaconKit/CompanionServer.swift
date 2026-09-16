@@ -367,6 +367,10 @@ public final class CompanionServer: @unchecked Sendable {
     /// Optional installed-app catalog (the app supplies one with icons). Falls
     /// back to a Foundation-only, icon-less enumeration.
     private let apps: (@Sendable () -> CompanionAppsDTO)?
+    /// One app's icon as PNG at the requested pixel size. Icons left /apps in
+    /// 1.9.3: 129 apps at 256 px was 7.8 MB of base64 in one blocking reply,
+    /// which a phone gives 15 s and then reports as the Mac being unreachable.
+    private let appIcon: (@Sendable (_ path: String, _ px: Int) -> Data?)?
     /// CompactOS: enumerate the Mac's open windows (nil disables /windows).
     private let windows: (@Sendable () async -> CompanionWindowsDTO)?
     /// CompactOS: open/focus an app and fit its window to the device. Returns
@@ -465,6 +469,7 @@ public final class CompanionServer: @unchecked Sendable {
                 screen: ScreenBroadcaster? = nil,
                 control: (@Sendable (ControlEvent) -> Void)? = nil,
                 apps: (@Sendable () -> CompanionAppsDTO)? = nil,
+                appIcon: (@Sendable (_ path: String, _ px: Int) -> Data?)? = nil,
                 windows: (@Sendable () async -> CompanionWindowsDTO)? = nil,
                 compactOpen: (@Sendable (CompanionCompactOpenRequestDTO) async -> CompanionCompactOpenResponseDTO?)? = nil,
                 screenTarget: (@Sendable (UInt32?) -> Void)? = nil,
@@ -513,6 +518,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.screen = screen
         self.control = control
         self.apps = apps
+        self.appIcon = appIcon
         self.windows = windows
         self.compactOpen = compactOpen
         self.screenTarget = screenTarget
@@ -1112,6 +1118,23 @@ public final class CompanionServer: @unchecked Sendable {
         }
 
         // GET /apps — installed Mac apps for the shortcut deck (control-only).
+        // GET /apps/icon?path=/Applications/X.app&px=128 — one icon as PNG.
+        // Fetched per row by the phone, so the list itself stays a few KB.
+        if method == "GET", path == "/apps/icon" {
+            guard let appIcon, let target = query["path"], !target.isEmpty else {
+                respond(conn, "404 Not Found", json: nil); return
+            }
+            let px = max(32, min(512, Int(query["px"] ?? "") ?? 128))
+            Task {
+                if let png = appIcon(target, px) {
+                    self.respondData(conn, "200 OK", contentType: "image/png", data: png)
+                } else {
+                    self.respond(conn, "404 Not Found", json: nil)
+                }
+            }
+            return
+        }
+
         if method == "GET", path == "/apps" {
             guard control != nil else { respond(conn, "404 Not Found", json: nil); return }
             let provided = apps
