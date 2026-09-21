@@ -183,6 +183,8 @@ public final class AuditLog: @unchecked Sendable {
             return ("audio.output", str("uid"))
         case ("POST", "agent") where segs.count == 2 && segs[1] == "task":
             return ("agent.task", str("task"))
+        case ("POST", "agent") where segs.count == 2 && segs[1] == "eager":
+            return ("agent.eager", str("text"))
         case ("POST", "agent") where segs.count == 3 && segs[2] == "decision":
             return ("agent.decision", str("approve"))
         case ("POST", "agent") where segs.count == 3 && segs[2] == "stop":

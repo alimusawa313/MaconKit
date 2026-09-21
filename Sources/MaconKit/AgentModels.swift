@@ -8,6 +8,7 @@
 //  feed — the loop runs entirely on the Mac.
 //
 //  Routes (CompanionServer):
+//    POST /agent/eager           a live partial transcript → launch the app it names, now
 //    POST /agent/task            start a task → { agent_id }
 //    WS   /agent/{id}/events     step feed, one JSON event per frame
 //    GET  /agent/{id}/events?after=N   same feed, plain JSON (CLI/debug)
@@ -65,6 +66,22 @@ public struct CompanionAgentEventDTO: Codable, Sendable {
 }
 
 /// Approve or skip the step named by an `approval` event's seq.
+/// A partial transcript, sent while the user is STILL TALKING. If it names an
+/// app that isn't frontmost, the Mac opens it right away, no model involved —
+/// which is what lets the app appear before the sentence ends. Everything else
+/// waits for the full utterance and the real task.
+public struct CompanionAgentEagerRequestDTO: Codable, Sendable {
+    public var text: String
+    public init(text: String) { self.text = text }
+}
+
+public struct CompanionAgentEagerResponseDTO: Codable, Sendable {
+    /// The app that was just launched, or nil when nothing was (no app named,
+    /// or it was already in front).
+    public var launched: String?
+    public init(launched: String?) { self.launched = launched }
+}
+
 public struct CompanionAgentDecisionDTO: Codable, Sendable {
     public var seq: Int
     public var approve: Bool

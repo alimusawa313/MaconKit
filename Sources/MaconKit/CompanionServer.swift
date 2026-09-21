@@ -219,13 +219,17 @@ public final class CompanionServer: @unchecked Sendable {
         public var stop: @Sendable (String) async -> Bool
         /// Approve/skip the step an `approval` event named.
         public var decision: @Sendable (String, Int, Bool) async -> Bool
+        /// A live partial transcript: open the app it names, if any, right now.
+        /// Nil = refused (control off) → 409.
+        public var eager: @Sendable (CompanionAgentEagerRequestDTO) async -> CompanionAgentEagerResponseDTO?
 
         public init(start: @escaping @Sendable (CompanionAgentTaskRequestDTO) async -> CompanionAgentStartResponseDTO?,
                     eventsSince: @escaping @Sendable (String, Int) async -> [CompanionAgentEventDTO],
                     stop: @escaping @Sendable (String) async -> Bool,
-                    decision: @escaping @Sendable (String, Int, Bool) async -> Bool) {
+                    decision: @escaping @Sendable (String, Int, Bool) async -> Bool,
+                    eager: @escaping @Sendable (CompanionAgentEagerRequestDTO) async -> CompanionAgentEagerResponseDTO? = { _ in nil }) {
             self.start = start; self.eventsSince = eventsSince
-            self.stop = stop; self.decision = decision
+            self.stop = stop; self.decision = decision; self.eager = eager
         }
     }
 
@@ -1245,6 +1249,23 @@ public final class CompanionServer: @unchecked Sendable {
         }
 
         // POST /agent/task — dictate a task; the Mac plans + drives itself.
+        // POST /agent/eager — the user is mid-sentence; if what they've said so
+        // far names an app, open it now. Answers fast and never blocks on a model.
+        if method == "POST", segs.count == 2, segs[0] == "agent", segs[1] == "eager" {
+            guard let agentOps else { respond(conn, "404 Not Found", json: nil); return }
+            guard let req = try? CompanionJSON.decoder.decode(CompanionAgentEagerRequestDTO.self, from: body) else {
+                respond(conn, "400 Bad Request", json: nil); return
+            }
+            Task {
+                if let resp = await agentOps.eager(req) {
+                    self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(resp))
+                } else {
+                    self.respond(conn, "409 Conflict", json: nil)
+                }
+            }
+            return
+        }
+
         if method == "POST", segs.count == 2, segs[0] == "agent", segs[1] == "task" {
             guard let agentOps else { respond(conn, "404 Not Found", json: nil); return }
             guard let req = try? CompanionJSON.decoder.decode(CompanionAgentTaskRequestDTO.self, from: body) else {
