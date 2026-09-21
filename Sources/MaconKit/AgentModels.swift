@@ -35,13 +35,17 @@ public struct CompanionAgentTaskRequestDTO: Codable, Sendable {
     /// The user's previous commands in this conversation, oldest first. "And
     /// search MKBHD" only means something after "open chrome".
     public var context: [String]?
+    /// What lets this Mac spend Macon's Jev. The device mints it by proving
+    /// its subscription; it carries no secret and expires on its own, so it
+    /// is safe on the wire and useless to anyone but Macon's relay.
+    public var grant: String?
 
     public init(task: String, mode: String? = nil, provider: String? = nil,
                 model: String? = nil, key: String? = nil, maxSteps: Int? = nil,
-                context: [String]? = nil) {
+                context: [String]? = nil, grant: String? = nil) {
         self.task = task; self.mode = mode; self.provider = provider
         self.model = model; self.key = key; self.maxSteps = maxSteps
-        self.context = context
+        self.context = context; self.grant = grant
     }
 }
 
@@ -77,7 +81,10 @@ public struct CompanionAgentEventDTO: Codable, Sendable {
 /// waits for the full utterance and the real task.
 public struct CompanionAgentEagerRequestDTO: Codable, Sendable {
     public var text: String
-    public init(text: String) { self.text = text }
+    /// Carried here too: a launch mid-sentence may be the first thing a device
+    /// asks for, before any task has handed a grant over.
+    public var grant: String?
+    public init(text: String, grant: String? = nil) { self.text = text; self.grant = grant }
 }
 
 public struct CompanionAgentEagerResponseDTO: Codable, Sendable {
