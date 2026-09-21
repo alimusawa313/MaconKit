@@ -32,11 +32,16 @@ public struct CompanionAgentTaskRequestDTO: Codable, Sendable {
     /// Cloud API key for the provider (nil for ollama or already remembered).
     public var key: String?
     public var maxSteps: Int?
+    /// The user's previous commands in this conversation, oldest first. "And
+    /// search MKBHD" only means something after "open chrome".
+    public var context: [String]?
 
     public init(task: String, mode: String? = nil, provider: String? = nil,
-                model: String? = nil, key: String? = nil, maxSteps: Int? = nil) {
+                model: String? = nil, key: String? = nil, maxSteps: Int? = nil,
+                context: [String]? = nil) {
         self.task = task; self.mode = mode; self.provider = provider
         self.model = model; self.key = key; self.maxSteps = maxSteps
+        self.context = context
     }
 }
 
