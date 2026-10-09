@@ -802,6 +802,40 @@ case "cancel":
         print("⏹ Cancelling \(build.repo) @ \(build.commit).")
     } catch { fail("\(error)") }
 
+case "maco":
+    // macon maco test — walk Maco's Lock Screen card through every mood on
+    // the devices showing him, through the real push path.
+    guard positional == "test" else { fail("Usage: macon maco test [--host H]") }
+    do {
+        let (code, data) = try await Remote.request("maco/test", method: "POST")
+        switch code {
+        case 200:
+            let reply = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+            let devices = reply["devices"] as? Int ?? 0
+            let seconds = reply["seconds"] as? Int ?? 0
+            let moods = (reply["moods"] as? [String] ?? []).joined(separator: " → ")
+            print("Maco is on tour: \(devices) device\(devices == 1 ? "" : "s"), about \(seconds) s.")
+            if !moods.isEmpty { print("  \(moods)") }
+            let replies = reply["replies"] as? [String] ?? []
+            if replies.isEmpty {
+                print("No answer from Apple yet (the relay may be slow).")
+            } else {
+                for r in replies { print("  Apple: \(r)") }
+            }
+            print("Cards the Mac can reach so far: \(reply["cards"] as? Int ?? 0)")
+            print("Lock the phone to watch. The card goes away at the end.")
+        case 409:
+            fail("""
+            Nobody is showing Maco yet. Check:
+              • on the Mac: Settings → Push build alerts to paired devices is on
+              • in Macon+: Settings → Maco → Show Maco on the Lock Screen is on
+              • open Macon+ once with this Mac selected, so it hands over its token
+            """)
+        default:
+            fail(Remote.httpHint(code))
+        }
+    } catch { fail("\(error)") }
+
 case "metrics":
     // Print the server's Prometheus exposition (same text a scraper gets).
     do {
@@ -976,6 +1010,7 @@ case "help", "--help", "-h":
       cancel [pipeline|build]      stop a running build
       pair --host H --code C       pair this CLI with a remote runner (local pairs itself)
       metrics                      print the server's Prometheus exposition (GET /metrics)
+      maco test                    walk Maco's Lock Screen card through every mood
       Common flags: --host H[:P] · --port P · --token T (or MACON_TOKEN) · --json
 
     Commands:

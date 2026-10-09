@@ -20,5 +20,10 @@ let package = Package(
             dependencies: ["MaconKit"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        .testTarget(
+            name: "MaconKitTests",
+            dependencies: ["MaconKit"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
     ]
 )

@@ -41,6 +41,8 @@
 //    GET  /coding-agents/{id}/decision?seq=N&wait=S  (Bearer)  the hook long-polls for an answer
 //    POST /coding-agents/{id}/decision  (Bearer)  a device answers a prompt {seq, allow}
 //    DELETE /coding-agents/{id} (Bearer)   forget a session
+//    GET  /recap?since=T        (Bearer)   what happened on this Mac since T (Unix seconds)
+//    POST /maco/test            (Bearer)   walk Maco's card through every mood, for testing
 //
 //  Two listeners, because the two ways in have different protection:
 //
@@ -447,6 +449,12 @@ public final class CompanionServer: @unchecked Sendable {
     private let clipboardOps: ClipboardOps?
     /// Coding agents (nil disables the /coding-agents routes).
     private let codingAgentOps: CodingAgentOps?
+    /// "While you were gone" for the calling device (nil disables /recap).
+    /// Gets the caller's token so its own doings stay out of the answer.
+    private let recap: (@Sendable (_ token: String, _ since: Date) async -> Data?)?
+    /// Start Maco's test tour; answers the JSON reply, or nil when there is
+    /// nobody to show it to (409). Nil closure disables the route.
+    private let macoTest: (@Sendable () async -> Data?)?
     /// Every request that changes something on this Mac, or opens a live
     /// session into it, is reported here with the caller's token and how it
     /// came in ("lan" | "tunnel"). Nil = no audit.
@@ -504,6 +512,8 @@ public final class CompanionServer: @unchecked Sendable {
                 setAudioOutput: (@Sendable (String) async -> Bool)? = nil,
                 clipboardOps: ClipboardOps? = nil,
                 codingAgentOps: CodingAgentOps? = nil,
+                recap: (@Sendable (_ token: String, _ since: Date) async -> Data?)? = nil,
+                macoTest: (@Sendable () async -> Data?)? = nil,
                 onAudit: (@Sendable (_ token: String, _ action: String, _ detail: String?, _ via: String) -> Void)? = nil,
                 onLog: @escaping @Sendable (String) -> Void,
                 onListening: @escaping @Sendable (Bool) -> Void = { _ in }) {
@@ -553,6 +563,8 @@ public final class CompanionServer: @unchecked Sendable {
         self.setAudioOutput = setAudioOutput
         self.clipboardOps = clipboardOps
         self.codingAgentOps = codingAgentOps
+        self.recap = recap
+        self.macoTest = macoTest
         self.onAudit = onAudit
         self.onLog = onLog
         self.onListening = onListening
@@ -1031,6 +1043,35 @@ public final class CompanionServer: @unchecked Sendable {
                 if let ack = await ops.push(body) {
                     self.respond(conn, "200 OK", json: ack)
                 } else { self.respond(conn, "403 Forbidden", json: nil) }
+            }
+            return
+        }
+
+        // GET /recap?since=T — what happened since the device last looked.
+        // A missing or silly T means the last eight hours; nothing older than
+        // the journal's week is kept anyway.
+        if method == "GET", path == "/recap" {
+            guard let recap else { respond(conn, "404 Not Found", json: nil); return }
+            let now = Date()
+            let asked = Double(query["since"] ?? "").map { Date(timeIntervalSince1970: $0) }
+            let since = min(now, max(asked ?? now.addingTimeInterval(-8 * 3600),
+                                     now.addingTimeInterval(-7 * 24 * 3600)))
+            Task {
+                if let data = await recap(token, since) {
+                    self.respond(conn, "200 OK", json: data)
+                } else { self.respond(conn, "403 Forbidden", json: nil) }
+            }
+            return
+        }
+
+        // POST /maco/test — every mood in turn on the devices showing Maco,
+        // through the real push path. `macon maco test` calls it.
+        if method == "POST", path == "/maco/test" {
+            guard let macoTest else { respond(conn, "404 Not Found", json: nil); return }
+            Task {
+                if let data = await macoTest() {
+                    self.respond(conn, "200 OK", json: data)
+                } else { self.respond(conn, "409 Conflict", json: nil) }
             }
             return
         }
