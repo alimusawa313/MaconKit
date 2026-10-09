@@ -67,6 +67,15 @@ public struct MacoSnapshot: Codable, Sendable, Equatable {
             && tool == other.tool && line == other.line && agent == other.agent && seq == other.seq
     }
 
+    /// The body of GET /maco: {"maco": {...}}, the same fields the phone's
+    /// MacoActivityAttributes.ContentState decodes. Nil (the server answers
+    /// {}) when there is nothing worth showing.
+    public static func routeBody(_ snapshot: MacoSnapshot?) -> Data? {
+        guard let snapshot, let body = try? CompanionJSON.encoder.encode(snapshot),
+              let json = try? JSONSerialization.jsonObject(with: body) else { return nil }
+        return try? JSONSerialization.data(withJSONObject: ["maco": json], options: [.sortedKeys])
+    }
+
     /// The content-state dictionary a Live Activity push carries.
     public var contentState: [String: Any] {
         var state: [String: Any] = ["mood": mood.rawValue, "count": count, "since": since]

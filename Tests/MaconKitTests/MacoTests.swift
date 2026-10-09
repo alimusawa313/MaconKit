@@ -21,6 +21,27 @@ final class MacoTests: XCTestCase {
         CompanionCodingAgentPromptDTO(seq: seq, tool: "Bash", summary: "git push", askedAt: now)
     }
 
+    /// GET /maco speaks the phone's ContentState: these keys, plain
+    /// words, the mood as its raw value, `since` in Unix seconds.
+    func testRouteBodyMatchesThePhone() throws {
+        let snap = MacoSnapshot(mood: .needsYou, count: 2, project: "macon-web", tool: "claude",
+                                line: "Bash: rm -rf build/", agent: "claude-7f21", seq: 7, since: 1_791_562_196)
+        let data = try XCTUnwrap(MacoSnapshot.routeBody(snap))
+        let top = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let maco = try XCTUnwrap(top["maco"] as? [String: Any])
+        XCTAssertEqual(Set(maco.keys), ["mood", "count", "project", "tool", "line", "agent", "seq", "since"])
+        XCTAssertEqual(maco["mood"] as? String, "needsYou")
+        XCTAssertEqual(maco["seq"] as? Int, 7)
+        XCTAssertEqual(maco["since"] as? Double, 1_791_562_196)
+        XCTAssertNil(MacoSnapshot.routeBody(nil))
+    }
+
+    func testRouteBodyLeavesOutWhatIsMissing() throws {
+        let data = try XCTUnwrap(MacoSnapshot.routeBody(MacoSnapshot(mood: .dozing, since: 10)))
+        let maco = try XCTUnwrap((JSONSerialization.jsonObject(with: data) as? [String: Any])?["maco"] as? [String: Any])
+        XCTAssertEqual(Set(maco.keys), ["mood", "count", "since"])
+    }
+
     func testNothingMeansNoCard() {
         XCTAssertNil(Maco.mood(agents: [], now: now))
     }
