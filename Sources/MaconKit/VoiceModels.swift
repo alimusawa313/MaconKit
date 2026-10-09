@@ -29,8 +29,12 @@ public struct CompanionVoiceTurnRequestDTO: Codable, Sendable {
     public var messages: [CompanionVoiceMsgDTO]
     public var provider: String?
     public var model: String?
-    public init(messages: [CompanionVoiceMsgDTO], provider: String? = nil, model: String? = nil) {
-        self.messages = messages; self.provider = provider; self.model = model
+    /// Who is speaking, when it is not the Mac itself (Maco sends his own).
+    /// Older devices leave it out.
+    public var persona: String?
+    public init(messages: [CompanionVoiceMsgDTO], provider: String? = nil, model: String? = nil,
+                persona: String? = nil) {
+        self.messages = messages; self.provider = provider; self.model = model; self.persona = persona
     }
 }
 
