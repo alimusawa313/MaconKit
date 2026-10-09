@@ -42,6 +42,7 @@
 //    POST /coding-agents/{id}/decision  (Bearer)  a device answers a prompt {seq, allow}
 //    DELETE /coding-agents/{id} (Bearer)   forget a session
 //    GET  /recap?since=T        (Bearer)   what happened on this Mac since T (Unix seconds)
+//    GET  /maco                 (Bearer)   Maco's mood right now: {"maco": {...}} or {} when idle
 //    POST /maco/test            (Bearer)   walk Maco's card through every mood, for testing
 //
 //  Two listeners, because the two ways in have different protection:
@@ -455,6 +456,8 @@ public final class CompanionServer: @unchecked Sendable {
     /// Start Maco's test tour; answers the JSON reply, or nil when there is
     /// nobody to show it to (409). Nil closure disables the route.
     private let macoTest: (@Sendable () async -> Data?)?
+    /// Maco's mood right now, for the phone's 3D room (nil disables GET /maco).
+    private let macoNow: (@Sendable () async -> Data?)?
     /// Every request that changes something on this Mac, or opens a live
     /// session into it, is reported here with the caller's token and how it
     /// came in ("lan" | "tunnel"). Nil = no audit.
@@ -514,6 +517,7 @@ public final class CompanionServer: @unchecked Sendable {
                 codingAgentOps: CodingAgentOps? = nil,
                 recap: (@Sendable (_ token: String, _ since: Date) async -> Data?)? = nil,
                 macoTest: (@Sendable () async -> Data?)? = nil,
+                macoNow: (@Sendable () async -> Data?)? = nil,
                 onAudit: (@Sendable (_ token: String, _ action: String, _ detail: String?, _ via: String) -> Void)? = nil,
                 onLog: @escaping @Sendable (String) -> Void,
                 onListening: @escaping @Sendable (Bool) -> Void = { _ in }) {
@@ -565,6 +569,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.codingAgentOps = codingAgentOps
         self.recap = recap
         self.macoTest = macoTest
+        self.macoNow = macoNow
         self.onAudit = onAudit
         self.onLog = onLog
         self.onListening = onListening
@@ -1061,6 +1066,14 @@ public final class CompanionServer: @unchecked Sendable {
                     self.respond(conn, "200 OK", json: data)
                 } else { self.respond(conn, "403 Forbidden", json: nil) }
             }
+            return
+        }
+
+        // GET /maco — the mood the Lock Screen card would show, asked for
+        // while Maco's room is open. {} when there is nothing going on.
+        if method == "GET", path == "/maco" {
+            guard let macoNow else { respond(conn, "404 Not Found", json: nil); return }
+            Task { self.respond(conn, "200 OK", json: await macoNow()) }
             return
         }
 

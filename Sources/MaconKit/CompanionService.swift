@@ -55,6 +55,7 @@ public final class CompanionService {
                 codingAgentOps: CompanionServer.CodingAgentOps? = nil,
                 recap: (@Sendable (_ token: String, _ since: Date) async -> Data?)? = nil,
                 macoTest: (@Sendable () async -> Data?)? = nil,
+                macoNow: (@Sendable () async -> Data?)? = nil,
                 onAudit: (@Sendable (_ token: String, _ action: String, _ detail: String?, _ via: String) -> Void)? = nil,
                 onAuthorize: (@Sendable (String) -> Void)? = nil,
                 onDeviceUnpaired: (@Sendable (String) -> Void)? = nil,
@@ -145,6 +146,7 @@ public final class CompanionService {
             codingAgentOps: codingAgentOps,
             recap: recap,
             macoTest: macoTest,
+            macoNow: macoNow,
             onAudit: onAudit,
             onLog: onLog,
             onListening: onListening)
