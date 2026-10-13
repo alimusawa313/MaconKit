@@ -400,6 +400,9 @@ public final class CompanionServer: @unchecked Sendable {
     private let privacy: (@Sendable (_ on: Bool) async -> Bool)?
     /// Lock the Mac's screen (login window). Returns whether it applied.
     private let lock: (@Sendable () async -> Bool)?
+    /// The awake timer + heat guard: nil change reads, a change applies and
+    /// reads back.
+    private let awake: (@Sendable (_ change: CompanionAwakeChangeDTO?) async -> CompanionAwakeDTO)?
     /// AI (local Ollama proxy). `aiModels` returns the encoded model list, or
     /// nil when the local model host is unreachable/disabled → 503. `aiChat`
     /// streams the reply: it forwards the request body to the local host and
@@ -494,6 +497,7 @@ public final class CompanionServer: @unchecked Sendable {
                 unlock: (@Sendable () async -> Bool)? = nil,
                 privacy: (@Sendable (_ on: Bool) async -> Bool)? = nil,
                 lock: (@Sendable () async -> Bool)? = nil,
+                awake: (@Sendable (_ change: CompanionAwakeChangeDTO?) async -> CompanionAwakeDTO)? = nil,
                 aiModels: (@Sendable () async -> Data?)? = nil,
                 aiProviders: (@Sendable () async -> Data?)? = nil,
                 aiChat: (@Sendable (_ body: Data, _ emit: @escaping @Sendable (Data) -> Void) async -> Void)? = nil,
@@ -546,6 +550,7 @@ public final class CompanionServer: @unchecked Sendable {
         self.unlock = unlock
         self.privacy = privacy
         self.lock = lock
+        self.awake = awake
         self.aiModels = aiModels
         self.aiProviders = aiProviders
         self.aiChat = aiChat
@@ -1413,6 +1418,21 @@ public final class CompanionServer: @unchecked Sendable {
                 let result = await privacy(on)
                 self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(["on": result]))
             }
+            return
+        }
+
+        // GET /power/awake — the awake timer and heat guard.
+        // POST /power/awake — change them (CompanionAwakeChangeDTO), reads back.
+        if segs.count == 2, segs[0] == "power", segs[1] == "awake", method == "GET" || method == "POST" {
+            guard let awake else { respond(conn, "404 Not Found", json: nil); return }
+            var change: CompanionAwakeChangeDTO?
+            if method == "POST" {
+                guard let c = try? CompanionJSON.decoder.decode(CompanionAwakeChangeDTO.self, from: body) else {
+                    respond(conn, "400 Bad Request", json: nil); return
+                }
+                change = c
+            }
+            Task { self.respond(conn, "200 OK", json: try? CompanionJSON.encoder.encode(await awake(change))) }
             return
         }
 

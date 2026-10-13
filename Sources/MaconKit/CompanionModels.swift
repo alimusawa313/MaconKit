@@ -287,6 +287,46 @@ public struct CompanionSystemDTO: Codable, Sendable {
     }
 }
 
+/// `GET /power/awake` — how long the Mac stays awake and what the heat guard
+/// is doing. `POST /power/awake` takes a `CompanionAwakeChangeDTO` and answers
+/// with this again.
+public struct CompanionAwakeDTO: Codable, Sendable {
+    public var keepAwake: Bool         // keep-awake is on
+    public var until: Date?            // the awake timer's end; nil = no timer
+    public var lidClosed: Bool         // lid-closed mode (pmset disablesleep) is on
+    public var heatGuard: Bool         // sleep when too hot, resume once cool
+    public var heatLimit: Double       // °C, battery
+    public var temperature: Double?    // °C, hottest battery sensor; nil = no battery
+    public var cooling: Bool           // the guard let the Mac sleep and is waiting
+    /// Sleep can be switched with nobody at the Mac. Without it lid-closed mode
+    /// can only be changed on the Mac itself (an admin prompt).
+    public var canSwitchSleep: Bool
+    public init(keepAwake: Bool, until: Date?, lidClosed: Bool, heatGuard: Bool,
+                heatLimit: Double, temperature: Double?, cooling: Bool, canSwitchSleep: Bool) {
+        self.keepAwake = keepAwake; self.until = until; self.lidClosed = lidClosed
+        self.heatGuard = heatGuard; self.heatLimit = heatLimit
+        self.temperature = temperature; self.cooling = cooling
+        self.canSwitchSleep = canSwitchSleep
+    }
+}
+
+/// `POST /power/awake` body. Every field is optional; only what is sent changes.
+public struct CompanionAwakeChangeDTO: Codable, Sendable {
+    public var keepAwake: Bool?
+    /// Stay awake this many minutes from now; 0 clears the timer. Implies
+    /// keepAwake on.
+    public var minutes: Int?
+    public var heatGuard: Bool?
+    public var heatLimit: Double?
+    /// Only applies when canSwitchSleep.
+    public var lidClosed: Bool?
+    public init(keepAwake: Bool? = nil, minutes: Int? = nil, heatGuard: Bool? = nil,
+                heatLimit: Double? = nil, lidClosed: Bool? = nil) {
+        self.keepAwake = keepAwake; self.minutes = minutes; self.heatGuard = heatGuard
+        self.heatLimit = heatLimit; self.lidClosed = lidClosed
+    }
+}
+
 public struct CompanionPowerDTO: Codable, Sendable {
     public var locked: Bool            // login/lock window is up
     public var displayAsleep: Bool     // the display has slept

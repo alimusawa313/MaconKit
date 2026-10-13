@@ -177,6 +177,7 @@ public final class AuditLog: @unchecked Sendable {
             case "unlock":  return ("unlocked", nil)
             case "lock":    return ("locked", nil)
             case "privacy": return ("curtain", str("on") ?? "on")
+            case "awake":   return ("awake.changed", nil)
             default:        return nil
             }
         case ("POST", "audio") where segs.count == 2 && segs[1] == "output":
